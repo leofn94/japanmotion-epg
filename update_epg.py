@@ -24,51 +24,18 @@ client = gspread.authorize(credentials)
 SPREADSHEET_ID = "1JKs0R5aFs4uWMBFDAuVtf2-hDDYd87ZkibTqFV600Rs"
 sheet = client.open_by_key(SPREADSHEET_ID).sheet1
 
-dias_semana = ["lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo"]
+dias_mapa = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"]
 
-def obtener_nombre_dia_limpio(texto_pestana):
-    txt = texto_pestana.lower()
-    for d in dias_semana:
-        if d in txt:
-            return d.capitalize()
-    
-    # Si dice "Hoy" o no detecta el día exacto, tomamos el día actual del sistema
+def obtener_dia_semana_actual():
     d_num = datetime.now().weekday()
-    return dias_semana[d_num].capitalize()
+    return dias_mapa[d_num]
 
 def siguiente_dia(dia_actual_nombre):
-    dia_clean = dia_actual_nombre.lower().replace("miércoles", "miercoles")
-    mapa_dias = ["lunes", "martes", "miercoles", "jueves", "viernes", "sabado", "domingo"]
-    mapa_dias_out = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"]
-    
-    if dia_clean in mapa_dias:
-        idx = (mapa_dias.index(dia_clean) + 1) % 7
-        return mapa_dias_out[idx]
+    dia_clean = dia_actual_nombre.strip()
+    if dia_clean in dias_mapa:
+        idx = (dias_mapa.index(dia_clean) + 1) % 7
+        return dias_mapa[idx]
     return dia_actual_nombre
-
-def extraer_titulo_y_descripcion(texto_bruto):
-    # Limpiar textos basura de la web
-    texto_limpio = re.sub(r'(Agendar|Google Calendar|Descargar|\.ics|18\+|13\+|TODOS|\b\d{1,2}:\d{2}\b)', '', texto_bruto, flags=re.I).strip()
-    
-    # Caso 1: Estructura "Título Ep. XX — Sinopsis"
-    if "—" in texto_limpio:
-        partes = texto_limpio.split("—", 1)
-        return partes[0].strip(), partes[1].strip()
-    
-    # Caso 2: Estructura "Título Ep. XX Sinopsis"
-    match_ep = re.search(r'^(.*?Ep\.\s*\d+)(.*)$', texto_limpio, re.I)
-    if match_ep:
-        return match_ep.group(1).strip(), match_ep.group(2).strip()
-
-    # Caso 3: Tomar las primeras palabras hasta la primera oración o frase larga
-    partes_oracion = re.split(r'(?<=[a-z0-9])\s+(?=[A-Z0-9])', texto_limpio)
-    if len(partes_oracion) > 1:
-        # El título suele ser el primer bloque corto
-        titulo = partes_oracion[0].strip()
-        descripcion = texto_limpio[len(titulo):].strip()
-        return titulo, descripcion
-
-    return texto_limpio[:30].strip(), texto_limpio.strip()
 
 filas_epg = [
     ["Dia", "Inicio", "Fin", "Programa", "Descripcion"]
@@ -86,36 +53,44 @@ with sync_playwright() as p:
     page = context.new_page()
     page.goto(url, wait_until="domcontentloaded", timeout=60000)
     
-    try:
-        page.wait_for_selector("article, [class*='schedule']", timeout=20000)
-    except Exception:
-        page.wait_for_timeout(4000)
+    # Esperamos a que cargue la grilla
+    page.wait_for_selector("article", timeout=20000)
 
-    pestañas = page.query_selector_all("button, [role='tab'], .nav-link, .day-tab")
-    pestañas_dias = [btn for btn in pestañas if any(d in btn.inner_text().lower() for d in dias_semana + ["hoy"])]
+    # Capturar los botones de las pestañas superiores
+    pestañas = page.query_selector_all("button, [role='tab'], .nav-tabs a, div[class*='tab']")
     
-    if not pestañas_dias:
-        pestañas_dias = [None]
+    # Filtrar solo botones válidos que contengan texto de fechas o días
+    pestañas_validas = []
+    for btn in pestañas:
+        txt = btn.inner_text().strip()
+        if txt and len(txt) < 30 and ("agosto" in txt.lower() or "septiembre" in txt.lower() or "hoy" in txt.lower() or any(d.lower() in txt.lower() for d in dias_mapa)):
+            pestañas_validas.append(btn)
 
-    for btn in pestañas_dias:
+    if not pestañas_validas:
+        pestañas_validas = [None]
+
+    dia_base_index = datetime.now().weekday()
+
+    for idx, btn in enumerate(pestañas_validas):
+        # Determinar el nombre del día
+        dia_efectivo_base = dias_mapa[(dia_base_index + idx) % 7]
+
         if btn:
-            dia_base = obtener_nombre_dia_limpio(btn.inner_text())
             try:
                 btn.click()
-                page.wait_for_timeout(1500)
+                page.wait_for_timeout(1000)
             except Exception:
                 pass
-        else:
-            dia_base = obtener_nombre_dia_limpio("Hoy")
 
         html_content = page.content()
         soup = BeautifulSoup(html_content, "html.parser")
         articulos = soup.find_all("article")
-        
+
         programas_dia = []
         paso_medianoche = False
 
         for art in articulos:
+            # Extraer Hora de Inicio
             texto_art = art.get_text(" ", strip=True)
             hora_match = re.search(r'\b\d{1,2}:\d{2}\b', texto_art)
             if not hora_match:
@@ -125,31 +100,43 @@ with sync_playwright() as p:
             if len(hora_ini) == 4:
                 hora_ini = "0" + hora_ini
 
-            # Control de salto de día a partir de las 00:00
+            # Control de paso a la medianoche (00:00)
             if len(programas_dia) > 0:
                 hora_prev = programas_dia[-1]["inicio"]
                 if hora_prev >= "23:00" and hora_ini < "06:00":
                     paso_medianoche = True
 
-            dia_efectivo = siguiente_dia(dia_base) if paso_medianoche else dia_base
+            dia_efectivo = siguiente_dia(dia_efectivo_base) if paso_medianoche else dia_efectivo_base
 
-            # Intentar leer primero del h3/h4 si existe
-            titulo_tag = art.find(["h3", "h4", "h5", "strong"])
-            if titulo_tag:
-                titulo = titulo_tag.get_text(strip=True)
-                desc = texto_art.replace(titulo, "", 1)
-                desc = re.sub(r'(Agendar|Google Calendar|Descargar|\.ics|18\+|13\+|TODOS|\b\d{1,2}:\d{2}\b)', '', desc, flags=re.I).strip()
+            # Extraer Título explícito (buscando etiquetas fuertes o encabezados)
+            titulo_elem = art.find(["h2", "h3", "h4", "h5", "strong", "b"])
+            if titulo_elem:
+                titulo = titulo_elem.get_text(strip=True)
             else:
-                titulo, desc = extraer_titulo_y_descripcion(texto_art)
+                # Si no hay etiqueta de título, extraemos hasta el primer punto o guión
+                partes = re.split(r'—|\.', texto_art, maxsplit=1)
+                titulo = partes[0].strip() if partes else "Programa"
+
+            # Limpieza del Título
+            titulo = re.sub(r'^\d{1,2}:\d{2}\s*', '', titulo)
+            titulo = re.sub(r'(Google Calendar|Agendar|Descargar|\.ics|18\+|13\+|TODOS)', '', titulo, flags=re.I).strip()
+
+            # Extraer Descripción limpia quitando el título y la hora
+            descripcion = texto_art
+            if titulo and titulo in descripcion:
+                descripcion = descripcion.replace(titulo, "", 1)
+            
+            descripcion = re.sub(r'\b\d{1,2}:\d{2}\b', '', descripcion)
+            descripcion = re.sub(r'(Agendar|Google Calendar|Descargar|\.ics|18\+|13\+|TODOS)', '', descripcion, flags=re.I).strip()
 
             programas_dia.append({
                 "dia": dia_efectivo,
                 "inicio": hora_ini,
-                "titulo": titulo,
-                "descripcion": desc
+                "titulo": titulo if titulo else "Programa",
+                "descripcion": descripcion
             })
 
-        # Calcular hora de Fin
+        # Autocompletar Horario de Fin
         for i in range(len(programas_dia)):
             item = programas_dia[i]
             if i < len(programas_dia) - 1:
