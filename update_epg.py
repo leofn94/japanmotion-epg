@@ -19,7 +19,7 @@ credentials_info = json.loads(gcp_key)
 credentials = Credentials.from_service_account_info(credentials_info, scopes=SCOPES)
 client = gspread.authorize(credentials)
 
-NOMBRE_PLANILLA = "Nombre De Tu Planilla EPG" # Tu planilla
+NOMBRE_PLANILLA = "japn epg" # Tu planilla
 sheet = client.open(NOMBRE_PLANILLA).sheet1
 
 # 2. Petición pasando por un proxy/scraper API para saltar el bloqueo de IP de GitHub
