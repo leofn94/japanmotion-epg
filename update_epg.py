@@ -26,14 +26,8 @@ sheet = client.open_by_key(SPREADSHEET_ID).sheet1
 
 dias_mapa = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"]
 
-def siguiente_dia(dia_actual):
-    if dia_actual in dias_mapa:
-        idx = (dias_mapa.index(dia_actual) + 1) % 7
-        return dias_mapa[idx]
-    return dia_actual
-
 def extraer_programa_y_descripcion(texto_raw):
-    # Limpiar residuales
+    # Limpiar palabras residuales del sitio
     texto = re.sub(r'(Agendar|Google Calendar|Descargar|\.ics|18\+|13\+|TODOS)', '', texto_raw, flags=re.I).strip()
     
     if "—" in texto:
@@ -50,13 +44,9 @@ def extraer_programa_y_descripcion(texto_raw):
         
     return texto[:35].strip(), texto.strip()
 
-filas_epg = [
-    ["Dia", "Inicio", "Fin", "Programa", "Descripcion"]
-]
-
 url = "https://www.japanmotion.com/horarios"
 
-# 2. Captura completa del contenido web
+# 2. Descarga del HTML dinámico con Playwright
 with sync_playwright() as p:
     browser = p.chromium.launch(headless=True)
     context = browser.new_context(
@@ -65,32 +55,29 @@ with sync_playwright() as p:
         user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
     )
     page = context.new_page()
-    page.goto(url, wait_until="networkidle", timeout=60000)
-    page.wait_for_timeout(3000)
+    page.goto(url, wait_until="domcontentloaded", timeout=60000)
+    page.wait_for_timeout(4000)
 
-    # Hacer scroll para forzar renderizado de cualquier lazy-loading
+    # Scroll para cargar todo el contenido dinámico
     page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
     page.wait_for_timeout(2000)
 
     html_content = page.content()
     browser.close()
 
-# 3. Procesamiento con BeautifulSoup
+# 3. Procesamiento y Depuración
 soup = BeautifulSoup(html_content, "html.parser")
 
-# Localizar todos los elementos que contengan bloques de la guía
-articulos = soup.find_all(["article", "tr", "li"])
+# Capturar únicamente los tags <article> para evitar duplicación con divs contenedores
+articulos = soup.find_all("article")
 if not articulos:
-    articulos = soup.find_all("div", class_=re.compile(r'schedule|program|card|item|row', re.I))
+    articulos = soup.find_all("div", class_=re.compile(r'schedule-item|program-card', re.I))
 
-dia_actual = dias_mapa[datetime.now().weekday()]
-programas_dia = []
-paso_medianoche = False
+programas_raw = []
 
 for art in articulos:
     texto_art = art.get_text(" ", strip=True)
     
-    # Debe contener un horario de inicio con formato HH:MM
     hora_match = re.search(r'\b\d{1,2}:\d{2}\b', texto_art)
     if not hora_match:
         continue
@@ -99,15 +86,7 @@ for art in articulos:
     if len(hora_ini) == 4:
         hora_ini = "0" + hora_ini
 
-    # Control del paso a la medianoche
-    if len(programas_dia) > 0:
-        hora_prev = programas_dia[-1]["inicio"]
-        if hora_prev >= "23:00" and hora_ini < "06:00":
-            paso_medianoche = True
-
-    dia_efectivo = siguiente_dia(dia_actual) if paso_medianoche else dia_actual
-
-    # Separar Título de Descripción
+    # Extraer Título vs Descripción
     titulo_tag = art.find(["h2", "h3", "h4", "h5", "strong", "b"])
     if titulo_tag:
         titulo = titulo_tag.get_text(strip=True)
@@ -119,26 +98,48 @@ for art in articulos:
         texto_sin_hora = re.sub(r'^\d{1,2}:\d{2}\s*', '', texto_art)
         titulo, desc = extraer_programa_y_descripcion(texto_sin_hora)
 
-    programas_dia.append({
-        "dia": dia_efectivo,
+    if not titulo:
+        titulo = "Programa"
+
+    # Filtro anti-duplicados inmediatos
+    if programas_raw and programas_raw[-1]["inicio"] == hora_ini and programas_raw[-1]["titulo"] == titulo:
+        continue
+
+    programas_raw.append({
         "inicio": hora_ini,
-        "titulo": titulo if titulo else "Programa",
+        "titulo": titulo,
         "descripcion": desc
     })
 
-# Autocompletar Horario de Fin
-for i in range(len(programas_dia)):
-    item = programas_dia[i]
-    if i < len(programas_dia) - 1:
-        item["fin"] = programas_dia[i+1]["inicio"]
+# 4. Asignación Secuencial de Días y Horarios de Fin
+filas_epg = [
+    ["Dia", "Inicio", "Fin", "Programa", "Descripcion"]
+]
+
+# El primer día arranca con el día de hoy (ej. Martes)
+indice_dia = datetime.now().weekday()
+
+for i in range(len(programas_raw)):
+    p_curr = programas_raw[i]
+    
+    # Detectar el cruce de medianoche (ejemplo de 23:30 a 00:00 o de 23:00 a 02:00)
+    if i > 0:
+        hora_prev = programas_raw[i-1]["inicio"]
+        hora_curr = p_curr["inicio"]
+        if hora_prev >= "20:00" and hora_curr < "06:00":
+            indice_dia = (indice_dia + 1) % 7
+
+    dia_nombre = dias_mapa[indice_dia]
+
+    # Calcular Fin con el inicio del programa siguiente
+    if i < len(programas_raw) - 1:
+        fin = programas_raw[i+1]["inicio"]
     else:
-        item["fin"] = programas_dia[0]["inicio"] if len(programas_dia) > 1 else ""
+        fin = programas_raw[0]["inicio"]
 
-    fila = [item["dia"], item["inicio"], item["fin"], item["titulo"], item["descripcion"]]
-    if fila not in filas_epg:
-        filas_epg.append(fila)
+    filas_epg.append([dia_nombre, p_curr["inicio"], fin, p_curr["titulo"], p_curr["descripcion"]])
 
-# 4. Volcado a Google Sheets
+# 5. Volcado limpio en Google Sheets
 sheet.clear()
 sheet.update(range_name='A1', values=filas_epg)
 print(f"¡Éxito! Se actualizaron {len(filas_epg)-1} registros correctamente.")
