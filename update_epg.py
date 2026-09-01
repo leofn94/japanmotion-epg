@@ -1,6 +1,7 @@
 import os
 import json
 import re
+from datetime import datetime, timedelta
 from bs4 import BeautifulSoup
 import gspread
 from google.oauth2.service_account import Credentials
@@ -14,7 +15,7 @@ SCOPES = [
 
 gcp_key = os.environ.get("GCP_SA_KEY")
 if not gcp_key:
-    raise ValueError("No se encontró la clave GCP_SA_KEY en los Secrets del repositorio.")
+    raise ValueError("No se encontró GCP_SA_KEY en los Secrets de GitHub.")
 
 credentials_info = json.loads(gcp_key)
 credentials = Credentials.from_service_account_info(credentials_info, scopes=SCOPES)
@@ -23,76 +24,111 @@ client = gspread.authorize(credentials)
 SPREADSHEET_ID = "1JKs0R5aFs4uWMBFDAuVtf2-hDDYd87ZkibTqFV600Rs"
 sheet = client.open_by_key(SPREADSHEET_ID).sheet1
 
-# 2. Scraping con Playwright (Navegador real)
-url = "https://www.japanmotion.com/horarios"
+# Función para restar 3 horas a los horarios traídos por el servidor en la nube
+def ajustar_zona_horaria(hora_str, horas_restar=3):
+    try:
+        dt = datetime.strptime(hora_str.strip(), "%H:%M")
+        dt_ajustada = dt - timedelta(hours=horas_restar)
+        return dt_ajustada.strftime("%H:%M")
+    except Exception:
+        return hora_str
 
-with sync_playwright() as p:
-    browser = p.chromium.launch(headless=True)
-    context = browser.new_context(
-        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-        viewport={"width": 1280, "height": 800}
-    )
-    page = context.new_page()
-    page.goto(url, wait_until="domcontentloaded", timeout=60000)
-    page.wait_for_selector("article", timeout=15000)
-    html_content = page.content()
-    browser.close()
-
-soup = BeautifulSoup(html_content, "html.parser")
-
-# Encabezados estructurados
 filas_epg = [
     ["Dia", "Inicio", "Fin", "Programa", "Descripcion"]
 ]
 
-main = soup.find("main")
-if main:
-    dia_actual = "Hoy"
+# 2. Navegación e interacción por pestañas con Playwright
+url = "https://www.japanmotion.com/horarios"
+
+with sync_playwright() as p:
+    browser = p.chromium.launch(headless=True)
+    # Definimos la zona horaria del navegador simulado
+    context = browser.new_context(
+        timezone_id="America/Argentina/Buenos_Aires",
+        viewport={"width": 1280, "height": 800}
+    )
+    page = context.new_page()
+    page.goto(url, wait_until="networkidle", timeout=60000)
+
+    # Buscamos los botones/pestañas de los días en la parte superior
+    pestañas = page.query_selector_all(".schedule-days button, .nav-tabs a, [role='tab']")
     
-    for elemento in main.find_all(["h2", "h3", "article", "div"]):
-        clases = elemento.get("class", [])
-        texto_elem = elemento.get_text(strip=True)
+    # Si no encuentra botones específicos, extraemos la vista general
+    if not pestañas:
+        pestañas = [None]
+
+    for index in range(len(pestañas)):
+        if pestañas[index]:
+            nombre_dia = pestañas[index].inner_text().strip().replace("\n", " ")
+            pestañas[index].click()
+            page.wait_for_timeout(1000) # Esperar a que renderice la pestaña
+        else:
+            nombre_dia = "Hoy"
+
+        html_content = page.content()
+        soup = BeautifulSoup(html_content, "html.parser")
         
-        # Detectar el nombre del día
-        if any(c in clases for c in ["schedule-day", "day-header", "date-title"]) or elemento.name in ["h2", "h3"]:
-            if any(d in texto_elem.lower() for d in ["lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo", "hoy", "agosto", "septiembre"]):
-                dia_actual = texto_elem
+        articulos = soup.find_all("article")
+        programas_dia = []
+
+        for art in articulos:
+            # Extraer Hora de Inicio limpia
+            hora_elem = art.find(class_=re.compile(r'time|hora', re.I))
+            hora_ini_raw = hora_elem.get_text(strip=True) if hora_elem else ""
+            
+            # Buscar el patrón HH:MM
+            hora_match = re.search(r'\b\d{1,2}:\d{2}\b', hora_ini_raw)
+            if not hora_match:
+                continue
+                
+            hora_ini = hora_match.group(0)
+            if len(hora_ini) == 4: # Formato 2:34 -> 02:34
+                hora_ini = "0" + hora_ini
+
+            # Extraer Título y Descripción limpios
+            info_div = art.find("div", class_="schedule-info")
+            if not info_div:
                 continue
 
-        # Procesar cada programa (<article>)
-        if elemento.name == "article":
-            hora_ini = ""
-            hora_fin = ""
-            
-            hora_elem = elemento.find(class_=re.compile(r'time|hora', re.I))
-            if hora_elem:
-                partes_hora = hora_elem.get_text(strip=True).split("-")
-                hora_ini = partes_hora[0].strip() if len(partes_hora) > 0 else ""
-                hora_fin = partes_hora[1].strip() if len(partes_hora) > 1 else ""
-
-            info_div = elemento.find("div", class_="schedule-info")
-            if not info_div:
-                info_div = elemento
-
-            titulo_tag = info_div.find(["h3", "h4", "h5", "strong", "b", "a"])
-            
-            if titulo_tag:
-                titulo = titulo_tag.get_text(strip=True)
-                desc_texto = info_div.get_text(" ", strip=True).replace(titulo, "", 1).strip()
+            # El título está en el h3/h4/strong
+            titulo_elem = info_div.find(["h3", "h4", "h5", "strong"])
+            if titulo_elem:
+                titulo = titulo_elem.get_text(strip=True)
             else:
-                texto_completo = info_div.get_text(" ", strip=True)
-                partes = re.split(r'(?<=\w)\s+—\s+|\n', texto_completo, maxsplit=1)
-                titulo = partes[0].strip() if len(partes) > 0 else "Programa"
-                desc_texto = partes[1].strip() if len(partes) > 1 else texto_completo
+                titulo = "Programa Sin Título"
 
-            desc_texto = re.sub(r'Agendar\s*Google Calendar\s*Descargar\s*\.ics', '', desc_texto).strip()
-
-            nueva_fila = [dia_actual, hora_ini, hora_fin, titulo, desc_texto]
+            # La descripción es el texto restante dentro del div descartando el título
+            texto_completo = info_div.get_text(" ", strip=True)
+            descripcion = texto_completo.replace(titulo, "", 1).strip()
             
-            if not filas_epg or filas_epg[-1] != nueva_fila:
-                filas_epg.append(nueva_fila)
+            # Limpiar textos de botones residuales de la descripción
+            descripcion = re.sub(r'(Agendar|Google Calendar|Descargar|\.ics|18\+|13\+|TODOS)', '', descripcion).strip()
 
-# 3. Guardar en Google Sheets
+            programas_dia.append({
+                "dia": nombre_dia,
+                "inicio": hora_ini,
+                "titulo": titulo,
+                "descripcion": descripcion
+            })
+
+        # Autocompletar Horario de Fin (Inicio del siguiente programa)
+        for i in range(len(programas_dia)):
+            item = programas_dia[i]
+            if i < len(programas_dia) - 1:
+                item["fin"] = programas_dia[i+1]["inicio"]
+            else:
+                # El último programa del día termina cuando empieza el primero
+                item["fin"] = programas_dia[0]["inicio"] if len(programas_dia) > 1 else ""
+
+            fila = [item["dia"], item["inicio"], item["fin"], item["titulo"], item["descripcion"]]
+            
+            # Evitar filas duplicadas
+            if fila not in filas_epg:
+                filas_epg.append(fila)
+
+    browser.close()
+
+# 3. Volcar datos ordenados en Google Sheets
 sheet.clear()
 sheet.update(range_name='A1', values=filas_epg)
-print(f"¡Éxito! Se actualizaron {len(filas_epg)-1} filas correctamente en Google Sheets.")
+print(f"¡Éxito! Se procesaron {len(filas_epg)-1} registros limpios con horarios y días correspondientes.")
