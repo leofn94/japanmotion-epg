@@ -21,7 +21,7 @@ client = gspread.authorize(credentials)
 
 # REEMPLAZA CON EL NOMBRE EXACTO DE TU PLANILLA EN GOOGLE DRIVE
 NOMBRE_PLANILLA = "japn epg" 
-sheet = client.open(japn epg).sheet1
+sheet = client.open(NOMBRE_PLANILLA).sheet1
 
 # 2. Scraping de Japan Motion con cabeceras anti-bloqueo
 url = "https://www.japanmotion.com/horarios"
