@@ -1,7 +1,6 @@
 import os
 import json
 import re
-from datetime import datetime, timedelta
 from bs4 import BeautifulSoup
 import gspread
 from google.oauth2.service_account import Credentials
@@ -30,31 +29,43 @@ filas_epg = [
 
 url = "https://www.japanmotion.com/horarios"
 
-# 2. Navegación optimizada con Playwright
 with sync_playwright() as p:
     browser = p.chromium.launch(headless=True)
     context = browser.new_context(
         timezone_id="America/Argentina/Buenos_Aires",
-        viewport={"width": 1280, "height": 800}
+        viewport={"width": 1280, "height": 800},
+        user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
     )
     page = context.new_page()
     
-    # Cambiamos a domcontentloaded para evitar timeouts por scripts de fondo
+    # Navegar a la página
     page.goto(url, wait_until="domcontentloaded", timeout=60000)
-    page.wait_for_timeout(3000) # Espera fija de 3 segundos para que renderice la grilla
-
-    # Buscamos los botones de los días en la pestaña superior
-    pestañas = page.query_selector_all(".schedule-days button, .nav-tabs a, [role='tab']")
     
-    # Si no se detectaron botones explícitos, procesamos la vista general
-    if not pestañas:
-        pestañas = [None]
+    # Esperar explícitamente a que aparezca cualquier elemento de la programación
+    try:
+        page.wait_for_selector("article, .schedule-item, [class*='schedule']", timeout=20000)
+    except Exception:
+        page.wait_for_timeout(5000)
 
-    for index in range(len(pestañas)):
-        if pestañas[index]:
-            nombre_dia = pestañas[index].inner_text().strip().replace("\n", " ")
+    # Intentar obtener las pestañas de días
+    pestañas = page.query_selector_all("button, [role='tab'], .nav-link, .day-tab")
+    
+    # Filtramos solo aquellos botones que tengan texto de días/meses
+    pestañas_dias = []
+    for btn in pestañas:
+        txt = btn.inner_text().strip().lower()
+        if any(d in txt for d in ["hoy", "lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo", "ene", "feb", "mar", "abr", "may", "jun", "jul", "ago", "sep", "oct", "nov", "dic"]):
+            pestañas_dias.append(btn)
+
+    # Si no detecta pestañas con texto de día, procesamos la página tal cual
+    if not pestañas_dias:
+        pestañas_dias = [None]
+
+    for btn in pestañas_dias:
+        if btn:
+            nombre_dia = btn.inner_text().strip().replace("\n", " ")
             try:
-                pestañas[index].click()
+                btn.click()
                 page.wait_for_timeout(1500)
             except Exception:
                 pass
@@ -64,15 +75,18 @@ with sync_playwright() as p:
         html_content = page.content()
         soup = BeautifulSoup(html_content, "html.parser")
         
+        # Buscar artículos o divs contenedores de programas
         articulos = soup.find_all("article")
+        if not articulos:
+            articulos = soup.find_all("div", class_=re.compile(r'schedule-item|program|card|event', re.I))
+
         programas_dia = []
 
         for art in articulos:
-            # Extraer Hora de Inicio
-            hora_elem = art.find(class_=re.compile(r'time|hora', re.I))
-            hora_ini_raw = hora_elem.get_text(strip=True) if hora_elem else ""
+            # Extraer Hora de Inicio (formato HH:MM)
+            texto_articulo = art.get_text(" ", strip=True)
+            hora_match = re.search(r'\b\d{1,2}:\d{2}\b', texto_articulo)
             
-            hora_match = re.search(r'\b\d{1,2}:\d{2}\b', hora_ini_raw)
             if not hora_match:
                 continue
                 
@@ -80,31 +94,35 @@ with sync_playwright() as p:
             if len(hora_ini) == 4:
                 hora_ini = "0" + hora_ini
 
-            # Extraer Título y Descripción
-            info_div = art.find("div", class_="schedule-info")
-            if not info_div:
-                continue
-
-            titulo_elem = info_div.find(["h3", "h4", "h5", "strong"])
+            # Buscar Título
+            titulo_elem = art.find(["h3", "h4", "h5", "strong", "b"])
             if titulo_elem:
                 titulo = titulo_elem.get_text(strip=True)
             else:
-                titulo = "Programa Sin Título"
+                # Si no encuentra tag de encabezado, tomar la primera línea con texto largo
+                lineas = [l.strip() for l in texto_articulo.split(" ") if l.strip()]
+                titulo = lineas[0] if lineas else "Programa Sin Título"
 
-            texto_completo = info_div.get_text(" ", strip=True)
-            descripcion = texto_completo.replace(titulo, "", 1).strip()
+            # Limpieza del título (quitar horarios o frases parásitas)
+            titulo = re.sub(r'^\d{1,2}:\d{2}\s*', '', titulo)
+            titulo = re.sub(r'(Google Calendar|Agendar|Descargar|\.ics)', '', titulo, flags=re.I).strip()
+
+            # Descripción completa omitiendo el título y horas
+            descripcion = texto_articulo
+            if titulo and titulo in descripcion:
+                descripcion = descripcion.replace(titulo, "", 1)
             
-            # Limpiar residuales
-            descripcion = re.sub(r'(Agendar|Google Calendar|Descargar|\.ics|18\+|13\+|TODOS)', '', descripcion).strip()
+            descripcion = re.sub(r'\b\d{1,2}:\d{2}\b', '', descripcion)
+            descripcion = re.sub(r'(Agendar|Google Calendar|Descargar|\.ics|18\+|13\+|TODOS)', '', descripcion, flags=re.I).strip()
 
             programas_dia.append({
                 "dia": nombre_dia,
                 "inicio": hora_ini,
-                "titulo": titulo,
+                "titulo": titulo if titulo else "Programa",
                 "descripcion": descripcion
             })
 
-        # Autocompletar Horario de Fin con el inicio del programa siguiente
+        # Autocompletar Horario de Fin (Horario de inicio del siguiente programa)
         for i in range(len(programas_dia)):
             item = programas_dia[i]
             if i < len(programas_dia) - 1:
@@ -119,7 +137,7 @@ with sync_playwright() as p:
 
     browser.close()
 
-# 3. Guardar en Google Sheets
+# 3. Actualizar la planilla de Google Sheets
 sheet.clear()
 sheet.update(range_name='A1', values=filas_epg)
 print(f"¡Éxito! Se actualizaron {len(filas_epg)-1} registros correctamente en Google Sheets.")
