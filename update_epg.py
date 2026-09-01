@@ -21,16 +21,32 @@ client = gspread.authorize(credentials)
 
 # REEMPLAZA CON EL NOMBRE EXACTO DE TU PLANILLA EN GOOGLE DRIVE
 NOMBRE_PLANILLA = "japn epg" 
-sheet = client.open(NOMBRE_PLANILLA).sheet1
+sheet = client.open(japn epg).sheet1
 
-# 2. Scraping de Japan Motion
+# 2. Scraping de Japan Motion con cabeceras anti-bloqueo
 url = "https://www.japanmotion.com/horarios"
 headers = {
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+    "Accept-Language": "es-ES,es;q=0.9,en;q=0.8",
+    "Cache-Control": "max-age=0",
+    "Sec-Ch-Ua": '"Chromium";v="122", "Not(A:Brand";v="24", "Google Chrome";v="122"',
+    "Sec-Ch-Ua-Mobile": "?0",
+    "Sec-Ch-Ua-Platform": '"Windows"',
+    "Sec-Fetch-Dest": "document",
+    "Sec-Fetch-Mode": "navigate",
+    "Sec-Fetch-Site": "none",
+    "Sec-Fetch-User": "?1",
+    "Upgrade-Insecure-Requests": "1"
 }
 
-response = requests.get(url, headers=headers)
+# Usamos una sesión para manejar correctamente la conexión
+session = requests.Session()
+response = session.get(url, headers=headers, timeout=15)
 response.raise_for_status()
+
+# Aseguramos la codificación correcta para caracteres en español
+response.encoding = 'utf-8'
 
 soup = BeautifulSoup(response.text, "html.parser")
 
@@ -40,7 +56,6 @@ filas_epg = [
 
 articulos = soup.find_all("article")
 for art in articulos:
-    # Extraemos info basada en la estructura confirmada (<article>)
     thumb = art.find("div", class_="schedule-thumb")
     info = art.find("div", class_="schedule-info")
     actions = art.find("div", class_="schedule-actions")
@@ -49,7 +64,6 @@ for art in articulos:
     texto_thumb = thumb.get_text(strip=True, separator=" ") if thumb else ""
     texto_actions = actions.get_text(strip=True, separator=" ") if actions else ""
 
-    # Extraemos el título o encabezado si existe dentro de info
     titulo_elem = info.find(["h2", "h3", "h4", "strong"]) if info else None
     titulo = titulo_elem.get_text(strip=True) if titulo_elem else "Sin Título"
 
