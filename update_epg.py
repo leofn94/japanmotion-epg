@@ -19,21 +19,26 @@ credentials_info = json.loads(gcp_key)
 credentials = Credentials.from_service_account_info(credentials_info, scopes=SCOPES)
 client = gspread.authorize(credentials)
 
-# COLOCA AQUÍ EL NOMBRE EXACTO DE TU PLANILLA EN GOOGLE DRIVE
-NOMBRE_PLANILLA = "japn epg" 
+NOMBRE_PLANILLA = "Nombre De Tu Planilla EPG" # Tu planilla
 sheet = client.open(NOMBRE_PLANILLA).sheet1
 
-# 2. Scraping usando imitación de TLS/Browser de Chrome 120
+# 2. Petición pasando por un proxy/scraper API para saltar el bloqueo de IP de GitHub
 url = "https://www.japanmotion.com/horarios"
 
-# impersonate="chrome120" engaña a las protecciones simulando un navegador real a nivel de red
-response = requests.get(url, impersonate="chrome120", timeout=30)
+# Usamos un proxy/service reflector o scraper proxy para evitar el bloqueo por IP de Datacenter
+proxy_url = f"https://api.allorigins.win/raw?url={url}"
+
+headers = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+}
+
+response = requests.get(proxy_url, headers=headers, impersonate="chrome120", timeout=30)
 response.raise_for_status()
 
 soup = BeautifulSoup(response.text, "html.parser")
 
 filas_epg = [
-    ["Programa", "Informacion", "Detalles", "Clasificacion"] # Encabezados de la planilla
+    ["Programa", "Informacion", "Detalles", "Clasificacion"]
 ]
 
 articulos = soup.find_all("article")
@@ -51,7 +56,6 @@ for art in articulos:
 
     filas_epg.append([titulo, texto_info, texto_thumb, texto_actions])
 
-# 3. Borrar contenido anterior y escribir nuevos datos
 sheet.clear()
 sheet.update(range_name='A1', values=filas_epg)
 print(f"¡Éxito! Se actualizaron {len(articulos)} programas en Google Sheets.")
