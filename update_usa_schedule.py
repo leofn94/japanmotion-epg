@@ -1,11 +1,12 @@
 import os
 import json
+import time
 from datetime import datetime, timedelta
 import pandas as pd
 import gspread
 from google.oauth2.service_account import Credentials
 
-# 1. Conexión con Google Sheets mediante Service Account
+# 1. Conexión con Google Sheets
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive"
@@ -19,19 +20,33 @@ credentials_info = json.loads(gcp_key)
 credentials = Credentials.from_service_account_info(credentials_info, scopes=SCOPES)
 client = gspread.authorize(credentials)
 
+# Función para reintentar abrir la hoja si Google devuelve error 503 o similar
+def abrir_sheet_con_reintento(spreadsheet_id, nombre_pestana=None, max_intentos=5):
+    for intento in range(1, max_intentos + 1):
+        try:
+            doc = client.open_by_key(spreadsheet_id)
+            if nombre_pestana:
+                try:
+                    return doc.worksheet(nombre_pestana)
+                except Exception:
+                    return doc.add_worksheet(title=nombre_pestana, rows=1000, cols=10)
+            return doc.sheet1
+        except gspread.exceptions.APIError as e:
+            code = getattr(e.response, "status_code", None)
+            if code in [500, 502, 503, 504] and intento < max_intentos:
+                espera = intento * 5
+                print(f"Aviso: Google API respondió con error {code}. Reintentando en {espera}s (Intento {intento}/{max_intentos})...")
+                time.sleep(espera)
+            else:
+                raise e
+
 # --- CONFIGURACIÓN DE SHEETS ---
-SHEET_ORIGEN_ID = "1GSqqTGAGtW32-n3XMFOaVs9bUEJSxgGfZe57yOqBS2o"  # Matriz origen en EST
-SHEET_DESTINO_ID = "1JKs0R5aFs4uWMBFDAuVtf2-hDDYd87ZkibTqFV600Rs" # Tu planilla principal
-NOMBRE_PESTANA = "BLAST"                                          # Pestaña objetivo
+SHEET_ORIGEN_ID = "1GSqqTGAGtW32-n3XMFOaVs9bUEJSxgGfZe57yOqBS2o"  # Matriz origen
+SHEET_DESTINO_ID = "1JKs0R5aFs4uWMBFDAuVtf2-hDDYd87ZkibTqFV600Rs" # Planilla principal
+NOMBRE_PESTANA = "BLAST"
 
-# Acceso a las hojas
-sheet_origen = client.open_by_key(SHEET_ORIGEN_ID).sheet1
-doc_destino = client.open_by_key(SHEET_DESTINO_ID)
-
-try:
-    sheet_destino = doc_destino.worksheet(NOMBRE_PESTANA)
-except Exception:
-    sheet_destino = doc_destino.add_worksheet(title=NOMBRE_PESTANA, rows=1000, cols=10)
+sheet_origen = abrir_sheet_con_reintento(SHEET_ORIGEN_ID)
+sheet_destino = abrir_sheet_con_reintento(SHEET_DESTINO_ID, NOMBRE_PESTANA)
 
 # 2. Descargar todos los datos de la matriz origen
 datos_matriz = sheet_origen.get_all_values()
@@ -42,7 +57,6 @@ if not datos_matriz:
 headers = datos_matriz[0]
 df = pd.DataFrame(datos_matriz[1:], columns=headers)
 
-# Mapeo de días de inglés a español
 DIAS_MAPA = {
     "Monday": "Lunes",
     "Tuesday": "Martes",
@@ -57,7 +71,7 @@ DIAS_ORDEN = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "
 
 programas_procesados = []
 
-# 3. Procesar día por día desde la matriz
+# 3. Procesar día por día
 col_hora = headers[0]  # Primera columna ("Time in EST")
 
 for col_dia in headers[1:]:
@@ -77,7 +91,6 @@ for col_dia in headers[1:]:
         if not hora_raw or not nombre_prog or nombre_prog.lower() in ["nan", "none", ""]:
             continue
 
-        # Convertir texto de hora EST a objeto datetime
         try:
             if "AM" in hora_raw.upper() or "PM" in hora_raw.upper():
                 dt_est = datetime.strptime(hora_raw.upper(), "%I:%M %p")
@@ -92,7 +105,6 @@ for col_dia in headers[1:]:
         dt_art = dt_est + timedelta(hours=1)
         hora_art_str = dt_art.strftime("%H:%M")
 
-        # Si al sumar 1 hora pasa de las 23:xx a las 00:xx, avanza al día siguiente
         if dt_est.hour == 23 and dt_art.hour == 0:
             idx_dia_sig = (DIAS_ORDEN.index(dia_encontrado) + 1) % 7
             dia_efectivo = DIAS_ORDEN[idx_dia_sig]
@@ -112,14 +124,11 @@ filas_epg = [
 
 for dia_nombre in DIAS_ORDEN:
     progs_dia = [p for p in programas_procesados if p["dia"] == dia_nombre]
-    
-    # Ordenar por horario de inicio
     progs_dia.sort(key=lambda x: x["inicio"])
 
     for i in range(len(progs_dia)):
         p_curr = progs_dia[i]
         
-        # Calcular hora de Fin
         if i < len(progs_dia) - 1:
             fin = progs_dia[i+1]["inicio"]
         else:
