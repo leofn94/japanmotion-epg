@@ -20,7 +20,6 @@ credentials_info = json.loads(gcp_key)
 credentials = Credentials.from_service_account_info(credentials_info, scopes=SCOPES)
 client = gspread.authorize(credentials)
 
-# Función para reintentar abrir la hoja si Google devuelve error 503 o similar
 def abrir_sheet_con_reintento(spreadsheet_id, nombre_pestana=None, max_intentos=5):
     for intento in range(1, max_intentos + 1):
         try:
@@ -48,7 +47,7 @@ NOMBRE_PESTANA = "BLAST"
 sheet_origen = abrir_sheet_con_reintento(SHEET_ORIGEN_ID)
 sheet_destino = abrir_sheet_con_reintento(SHEET_DESTINO_ID, NOMBRE_PESTANA)
 
-# 2. Descargar todos los datos de la matriz origen
+# 2. Descargar datos de la matriz
 datos_matriz = sheet_origen.get_all_values()
 
 if not datos_matriz:
@@ -71,8 +70,8 @@ DIAS_ORDEN = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "
 
 programas_procesados = []
 
-# 3. Procesar día por día
-col_hora = headers[0]  # Primera columna ("Time in EST")
+# 3. Procesar matriz
+col_hora = headers[0]
 
 for col_dia in headers[1:]:
     dia_encontrado = None
@@ -139,4 +138,4 @@ for dia_nombre in DIAS_ORDEN:
 # 5. Volcar en la pestaña 'BLAST'
 sheet_destino.clear()
 sheet_destino.update(range_name='A1', values=filas_epg)
-print(f"¡Éxito! Se procesó la matriz y se cargaron {len(filas_epg)-1} registros formateados a hora de Argentina en la pestaña BLAST.")
+print(f"¡Éxito! Se procesó la matriz y se cargaron {len(filas_epg)-1} registros en BLAST.")
