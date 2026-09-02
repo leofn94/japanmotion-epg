@@ -30,3 +30,18 @@ jobs:
         env:
           GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
         run: python update_epg.py
+
+
+
+      - name: Ejecutar script de Japan Motion
+        env:
+          GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
+        run: python update_epg.py
+
+      - name: Ejecutar script de CN City
+        env:
+          GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
+        run: python update_cncity.py
+
+
+        
