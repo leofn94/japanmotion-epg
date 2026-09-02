@@ -2,14 +2,16 @@ name: Actualizador de EPG Japan Motion
 
 on:
   schedule:
-    - cron: '0 4 * * *'
+    # Se ejecuta automáticamente cada 3 horas (minuto 0)
+    - cron: '0 */3 * * *'
+  # Mantiene la opción de ejecutarlo manualmente cuando quieras
   workflow_dispatch:
 
 jobs:
-  run-scraper:
+  build:
     runs-on: ubuntu-latest
     steps:
-      - name: Descargar repositorio
+      - name: Checkout del código
         uses: actions/checkout@v3
 
       - name: Configurar Python
@@ -19,10 +21,12 @@ jobs:
 
       - name: Instalar dependencias
         run: |
-          pip install -r requirements.txt
-          playwright install --with-deps chromium
+          python -m pip install --upgrade pip
+          pip install playwright beautifulsoup4 gspread google-auth
+          playwright install chromium
+          playwright install-deps
 
-      - name: Ejecutar Scraper
+      - name: Ejecutar script de actualización
         env:
           GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
         run: python update_epg.py
