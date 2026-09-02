@@ -3,6 +3,7 @@ import json
 import time
 from datetime import datetime
 import zoneinfo
+import re
 import gspread
 from google.oauth2.service_account import Credentials
 from playwright.sync_api import sync_playwright
@@ -47,8 +48,8 @@ sheet = abrir_sheet_con_reintento(SPREADSHEET_ID)
 
 dias_mapa = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"]
 
-# 2. Scraping Web
-url = "https://japanmotion.site/"
+# 2. Scraping Web con la URL correcta
+url = "https://www.japanmotion.com/horarios"
 
 with sync_playwright() as p:
     browser = p.chromium.launch(headless=True)
@@ -81,7 +82,6 @@ programas_raw = []
 
 for b in bloques:
     texto_art = b.get_text(" ", strip=True)
-    import re
     matches_hora = re.findall(r'\b\d{1,2}:\d{2}\b', texto_art)
     if not matches_hora:
         continue
