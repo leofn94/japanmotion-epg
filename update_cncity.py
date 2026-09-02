@@ -24,14 +24,22 @@ client = gspread.authorize(credentials)
 
 SPREADSHEET_ID = "1JKs0R5aFs4uWMBFDAuVtf2-hDDYd87ZkibTqFV600Rs"
 
-# Abre o crea la pestaña de CNCity en el Spreadsheet
+# Abre o crea la pestaña 'CNCITY' en el Spreadsheet
 try:
     sheet = client.open_by_key(SPREADSHEET_ID).worksheet("CNCITY")
 except Exception:
-    # Si no existe la pestaña 'CNCITY', la crea automáticamente
     sheet = client.open_by_key(SPREADSHEET_ID).add_worksheet(title="CNCITY", rows=1000, cols=10)
 
-dias_mapa = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"]
+# Mapeo de días abreviados a nombres completos
+DIAS_BUSQUEDA = [
+    {"abrev": "LUN", "nombre": "Lunes"},
+    {"abrev": "MAR", "nombre": "Martes"},
+    {"abrev": "MIÉ", "nombre": "Miércoles", "alt": "MIE"},
+    {"abrev": "JUE", "nombre": "Jueves"},
+    {"abrev": "VIE", "nombre": "Viernes"},
+    {"abrev": "SÁB", "nombre": "Sábado", "alt": "SAB"},
+    {"abrev": "DOM", "nombre": "Domingo"}
+]
 
 filas_epg = [
     ["Dia", "Inicio", "Fin", "Programa", "Descripcion"]
@@ -39,7 +47,6 @@ filas_epg = [
 
 url = "https://cncity.live/"
 
-# 2. Extracción interactiva con Playwright
 with sync_playwright() as p:
     browser = p.chromium.launch(headless=True)
     context = browser.new_context(
@@ -48,73 +55,72 @@ with sync_playwright() as p:
         user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
     )
     page = context.new_page()
-    page.goto(url, wait_until="domcontentloaded", timeout=60000)
+    
+    print("Navegando a CN City...")
+    page.goto(url, wait_until="networkidle", timeout=60000)
     page.wait_for_timeout(3000)
 
-    # 1. Hacer clic en la sección 'Grilla'
+    # 1. Hacer clic en la sección 'GRILLA'
     try:
-        grilla_btn = page.locator("text=/grilla/i").first
+        grilla_btn = page.get_by_text("GRILLA", exact=False).first
         if grilla_btn.is_visible():
             grilla_btn.click()
+            print("Se hizo clic en GRILLA")
             page.wait_for_timeout(2000)
     except Exception as e:
         print("Aviso al buscar sección Grilla:", e)
 
-    # 2. Seleccionar la opción de 'Argentina'
+    # 2. Seleccionar el país / franja horaria 'ARGENTINA'
     try:
-        arg_btn = page.locator("text=/argentina/i").first
+        arg_btn = page.get_by_text("ARGENTINA", exact=False).first
         if arg_btn.is_visible():
             arg_btn.click()
+            print("Se seleccionó la franja horaria ARGENTINA")
             page.wait_for_timeout(2000)
     except Exception as e:
         print("Aviso al seleccionar Argentina:", e)
 
-    # 3. Recorrer los días disponibles
-    # Buscamos botones o solapas de días
-    pestañas_dias = page.query_selector_all("button, a, [role='tab']")
-    
-    # Filtrar solo pestañas correspondientes a días o fechas
-    dias_validos = []
-    for elem in pestañas_dias:
-        txt = elem.inner_text().strip()
-        if any(d.lower() in txt.lower() for d in ["lunes", "martes", "miércoles", "miercoles", "jueves", "viernes", "sábado", "sabado", "domingo", "hoy"]):
-            dias_validos.append(elem)
-
-    if not dias_validos:
-        dias_validos = [None]
-
-    tz_local = zoneinfo.ZoneInfo("America/Argentina/Buenos_Aires")
-    dia_base_idx = datetime.now(tz_local).weekday()
-
     programas_todos = []
 
-    for idx, btn_dia in enumerate(dias_validos):
-        dia_efectivo_base = dias_mapa[(dia_base_idx + idx) % 7]
+    # 3. Recorrer cada día haciendo clic explícito en la pestaña correspondiente (LUN, MAR, MIÉ, JUE, VIE, SÁB, DOM)
+    for dia_info in DIAS_BUSQUEDA:
+        nombre_dia = dia_info["nombre"]
+        abrev = dia_info["abrev"]
+        alt = dia_info.get("alt", abrev)
 
-        if btn_dia:
-            try:
-                btn_dia.click()
-                page.wait_for_timeout(1500)
-            except Exception:
-                pass
+        print(f"Obteniendo grilla para {nombre_dia} ({abrev})...")
 
-        # Scroll suave para forzar la carga de la grilla del día
+        # Intentar localizar el botón del día por texto abreviado exacto o regex
+        btn_selector = f"text=/^\\\\s*({abrev}|{alt})\\\\s*$/i"
+        dia_btn = page.locator(btn_selector).first
+
+        hizo_click = False
+        try:
+            if dia_btn.is_visible():
+                dia_btn.click(force=True)
+                hizo_click = True
+                page.wait_for_timeout(2000) # Esperar a que JS renderice la nueva grilla
+        except Exception as err:
+            print(f"No se pudo hacer clic directamente en {abrev}: {err}")
+
+        # Hacer scroll para asegurar la carga completa de elementos
         page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
         page.wait_for_timeout(1000)
 
+        # Parsear el HTML desplegado
         html_content = page.content()
         soup = BeautifulSoup(html_content, "html.parser")
 
-        # Buscar contenedores de ítems de programación
-        bloques = soup.find_all(["article", "tr", "li", "div"], class_=re.compile(r'item|card|program|schedule|show|event', re.I))
+        # Buscar bloques de programación
+        bloques = soup.find_all(["article", "tr", "li", "div"], class_=re.compile(r'item|card|program|schedule|show|event|block|grid', re.I))
 
         programas_dia = []
         paso_medianoche = False
 
         for b in bloques:
             texto = b.get_text(" ", strip=True)
-            
-            # Buscar formato horario HH:MM
+
+            # Buscar patrón de horario HH:MM
             hora_match = re.search(r'\b\d{1,2}:\d{2}\b', texto)
             if not hora_match:
                 continue
@@ -123,15 +129,16 @@ with sync_playwright() as p:
             if len(hora_ini) == 4:
                 hora_ini = "0" + hora_ini
 
-            # Transición tras la medianoche
+            # Transición tras la medianoche si la grilla es continua
             if len(programas_dia) > 0:
                 hora_prev = programas_dia[-1]["inicio"]
                 if hora_prev >= "20:00" and hora_ini < "06:00":
                     paso_medianoche = True
 
-            dia_efectivo = dias_mapa[(dias_mapa.index(dia_efectivo_base) + 1) % 7] if paso_medianoche else dia_efectivo_base
+            dias_mapa = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"]
+            dia_efectivo = dias_mapa[(dias_mapa.index(nombre_dia) + 1) % 7] if paso_medianoche else nombre_dia
 
-            # Extraer Título y Descripción
+            # Separar título y descripción
             titulo_tag = b.find(["h2", "h3", "h4", "h5", "strong", "b", "span"], class_=re.compile(r'title|nombre|programa', re.I))
             if titulo_tag:
                 titulo = titulo_tag.get_text(strip=True)
@@ -145,7 +152,7 @@ with sync_playwright() as p:
             titulo = re.sub(r'^\d{1,2}:\d{2}\s*', '', titulo).strip()
             desc = re.sub(r'\b\d{1,2}:\d{2}\b', '', desc).strip()
 
-            # Evitar duplicados inmediatos
+            # Evitar elementos duplicados inmediatos
             if programas_dia and programas_dia[-1]["inicio"] == hora_ini and programas_dia[-1]["titulo"] == titulo:
                 continue
 
@@ -156,11 +163,12 @@ with sync_playwright() as p:
                 "descripcion": desc
             })
 
+        print(f" -> Encontrados {len(programas_dia)} programas para {nombre_dia}")
         programas_todos.extend(programas_dia)
 
     browser.close()
 
-# 3. Asignación de Horario de Fin
+# 4. Asignación de Horario de Fin
 for i in range(len(programas_todos)):
     p_curr = programas_todos[i]
     if i < len(programas_todos) - 1:
@@ -172,7 +180,7 @@ for i in range(len(programas_todos)):
     if fila not in filas_epg:
         filas_epg.append(fila)
 
-# 4. Volcado a Google Sheets en la pestaña CNCITY
+# 5. Volcado a Google Sheets
 sheet.clear()
 sheet.update(range_name='A1', values=filas_epg)
-print(f"¡Éxito! Se actualizaron {len(filas_epg)-1} registros para CN City.")
+print(f"¡Éxito! Se actualizaron {len(filas_epg)-1} registros totales para los 7 días en CN City.")
