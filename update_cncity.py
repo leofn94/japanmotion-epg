@@ -32,18 +32,13 @@ except Exception:
 
 dias_mapa = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"]
 
-def extraer_programa_y_descripcion(texto_raw):
-    texto = re.sub(r'(Agendar|Google Calendar|Descargar|\.ics|18\+|13\+|TODOS)', '', texto_raw, flags=re.I).strip()
-    if "—" in texto:
-        partes = texto.split("—", 1)
-        return partes[0].strip(), partes[1].strip()
-    match_ep = re.search(r'^(.*?(?:Ep\.|Episode|Cap\.|Capítulo)\s*\d+)(.*)$', texto, re.I)
-    if match_ep:
-        return match_ep.group(1).strip(), match_ep.group(2).strip()
-    partes = re.split(r'(?<=[a-z0-9])\s+(?=[A-Z0-9])', texto, maxsplit=1)
-    if len(partes) == 2:
-        return partes[0].strip(), partes[1].strip()
-    return texto[:35].strip(), texto.strip()
+def limpiar_texto_programa(texto_raw):
+    # Eliminar duraciones tipo '23 min', '12 min'
+    texto = re.sub(r'\b\d{1,3}\s*min\b', '', texto_raw, flags=re.I)
+    # Eliminar palabras/botones residuales del reproductor
+    texto = re.sub(r'(Agendar|Google Calendar|Descargar|\.ics|18\+|13\+|TODOS)', '', texto, flags=re.I)
+    # Normalizar espacios
+    return re.sub(r'\s+', ' ', texto).strip()
 
 url = "https://cncity.live/"
 
@@ -76,7 +71,7 @@ with sync_playwright() as p:
     except Exception as e:
         print("Aviso al seleccionar Argentina:", e)
 
-    # 3. Scroll progresivo para desplegar todo lo cargado dinámicamente
+    # 3. Scroll progresivo
     for _ in range(3):
         page.evaluate("window.scrollBy(0, 800)")
         page.wait_for_timeout(1000)
@@ -84,14 +79,13 @@ with sync_playwright() as p:
     html_content = page.content()
     browser.close()
 
-# 4. Procesamiento de los datos reales del DOM
+# 4. Procesamiento
 soup = BeautifulSoup(html_content, "html.parser")
 
 bloques = soup.find_all("article")
 if not bloques:
     bloques = soup.find_all(["div", "tr", "li"], class_=re.compile(r'item|card|program|schedule|show|event', re.I))
 
-# Determinamos el día inicial según la hora local de Argentina
 tz_local = zoneinfo.ZoneInfo("America/Argentina/Buenos_Aires")
 indice_dia = datetime.now(tz_local).weekday()
 
@@ -100,38 +94,34 @@ programas_raw = []
 for b in bloques:
     texto_art = b.get_text(" ", strip=True)
     
-    hora_match = re.search(r'\b\d{1,2}:\d{2}\b', texto_art)
-    if not hora_match:
+    # Filtrar contenedores masivos con múltiples horarios (evita la 1ª fila basura)
+    matches_hora = re.findall(r'\b\d{1,2}:\d{2}\b', texto_art)
+    if len(matches_hora) > 2 or not matches_hora:
         continue
         
-    hora_ini = hora_match.group(0)
+    hora_ini = matches_hora[0]
     if len(hora_ini) == 4:
         hora_ini = "0" + hora_ini
 
-    titulo_tag = b.find(["h2", "h3", "h4", "h5", "strong", "b"])
-    if titulo_tag:
-        titulo = titulo_tag.get_text(strip=True)
-        titulo = re.sub(r'^\d{1,2}:\d{2}\s*', '', titulo).strip()
-        desc = texto_art.replace(titulo, "", 1)
-        desc = re.sub(r'\b\d{1,2}:\d{2}\b', '', desc)
-        desc = re.sub(r'(Agendar|Google Calendar|Descargar|\.ics|18\+|13\+|TODOS)', '', desc, flags=re.I).strip()
-    else:
-        texto_sin_hora = re.sub(r'^\d{1,2}:\d{2}\s*', '', texto_art)
-        titulo, desc = extraer_programa_y_descripcion(texto_sin_hora)
+    # Tomar TODO el texto restándole solo la hora de inicio
+    texto_sin_hora = re.sub(r'^\d{1,2}:\d{2}\s*', '', texto_art)
+    
+    # Limpiar duraciones y caracteres sobrantes
+    programa_completo = limpiar_texto_programa(texto_sin_hora)
 
-    if not titulo:
-        titulo = "Programa"
+    if not programa_completo or len(programa_completo) < 2:
+        continue
 
-    if programas_raw and programas_raw[-1]["inicio"] == hora_ini and programas_raw[-1]["titulo"] == titulo:
+    # Evitar duplicados inmediatos
+    if programas_raw and programas_raw[-1]["inicio"] == hora_ini and programas_raw[-1]["programa"] == programa_completo:
         continue
 
     programas_raw.append({
         "inicio": hora_ini,
-        "titulo": titulo,
-        "descripcion": desc
+        "programa": programa_completo
     })
 
-# 5. Formatear lista final con cálculo automático de día y hora fin
+# 5. Formatear lista final
 filas_epg = [
     ["Dia", "Inicio", "Fin", "Programa", "Descripcion"]
 ]
@@ -139,7 +129,7 @@ filas_epg = [
 for i in range(len(programas_raw)):
     p_curr = programas_raw[i]
     
-    # Si la hora pasa de noche (>=20:00) a madrugada (<06:00), avanzamos el día automáticamente
+    # Control de paso a la medianoche
     if i > 0:
         hora_prev = programas_raw[i-1]["inicio"]
         hora_curr = p_curr["inicio"]
@@ -153,9 +143,10 @@ for i in range(len(programas_raw)):
     else:
         fin = programas_raw[0]["inicio"]
 
-    filas_epg.append([dia_nombre, p_curr["inicio"], fin, p_curr["titulo"], p_curr["descripcion"]])
+    # Descripcion queda vacia ("")
+    filas_epg.append([dia_nombre, p_curr["inicio"], fin, p_curr["programa"], ""])
 
 # 6. Volcar a Google Sheets
 sheet.clear()
 sheet.update(range_name='A1', values=filas_epg)
-print(f"¡Éxito! Se cargaron {len(filas_epg)-1} programas reales en la pestaña CNCITY.")
+print(f"¡Éxito! Se actualizaron {len(filas_epg)-1} registros. Todo el texto va en 'Programa' y 'Descripcion' queda vacía.")
