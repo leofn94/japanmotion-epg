@@ -1,15 +1,15 @@
 import os
 import json
 import time
+import re
 from datetime import datetime
 import zoneinfo
-import re
 import gspread
 from google.oauth2.service_account import Credentials
 from playwright.sync_api import sync_playwright
 from bs4 import BeautifulSoup
 
-# 1. Autenticación
+# 1. Autenticación con Google Sheets
 SCOPES = [
     "https://www.googleapis.com/auth/spreadsheets",
     "https://www.googleapis.com/auth/drive"
@@ -48,7 +48,7 @@ sheet = abrir_sheet_con_reintento(SPREADSHEET_ID)
 
 dias_mapa = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"]
 
-# 2. Scraping Web con la URL correcta
+# 2. Scraping Web apontando a la sección de Horarios
 url = "https://www.japanmotion.com/horarios"
 
 with sync_playwright() as p:
@@ -69,11 +69,11 @@ with sync_playwright() as p:
     html_content = page.content()
     browser.close()
 
-# 3. Extracción y Limpieza
+# 3. Extracción y Separación de Título vs Descripción
 soup = BeautifulSoup(html_content, "html.parser")
 bloques = soup.find_all("article")
 if not bloques:
-    bloques = soup.find_all(["div", "tr", "li"])
+    bloques = soup.find_all(["div", "tr", "li"], class_=re.compile(r'item|card|program|schedule|show|event', re.I))
 
 tz_local = zoneinfo.ZoneInfo("America/Argentina/Buenos_Aires")
 indice_dia = datetime.now(tz_local).weekday()
@@ -81,27 +81,35 @@ indice_dia = datetime.now(tz_local).weekday()
 programas_raw = []
 
 for b in bloques:
-    texto_art = b.get_text(" ", strip=True)
-    matches_hora = re.findall(r'\b\d{1,2}:\d{2}\b', texto_art)
-    if not matches_hora:
+    texto_art = b.get_text("\n", strip=True)
+    lineas = [l.strip() for l in texto_art.split("\n") if l.strip()]
+
+    hora_ini = None
+    lineas_filtradas = []
+    
+    for l in lineas:
+        match_h = re.search(r'\b\d{1,2}:\d{2}\b', l)
+        if match_h and not hora_ini:
+            hora_ini = match_h.group(0)
+            if len(hora_ini) == 4:
+                hora_ini = "0" + hora_ini
+        else:
+            if not re.search(r'^(Agendar|Google Calendar|Descargar|\.ics|18\+|13\+|TODOS|\d{1,3}\s*min)$', l, re.I):
+                lineas_filtradas.append(l)
+
+    if not hora_ini or not lineas_filtradas:
         continue
-        
-    hora_ini = matches_hora[0]
-    if len(hora_ini) == 4:
-        hora_ini = "0" + hora_ini
 
-    texto_sin_hora = re.sub(r'^\d{1,2}:\d{2}\s*', '', texto_art)
-    programa_limpio = re.sub(r'\s+', ' ', texto_sin_hora).strip()
+    titulo = lineas_filtradas[0]
+    descripcion = " ".join(lineas_filtradas[1:]).strip() if len(lineas_filtradas) > 1 else ""
 
-    if not programa_limpio or len(programa_limpio) < 2:
-        continue
-
-    if programas_raw and programas_raw[-1]["inicio"] == hora_ini and programas_raw[-1]["programa"] == programa_limpio:
+    if programas_raw and programas_raw[-1]["inicio"] == hora_ini and programas_raw[-1]["programa"] == titulo:
         continue
 
     programas_raw.append({
         "inicio": hora_ini,
-        "programa": programa_limpio
+        "programa": titulo,
+        "descripcion": descripcion
     })
 
 # 4. Formatear grilla EPG
@@ -125,8 +133,9 @@ for i in range(len(programas_raw)):
     else:
         fin = programas_raw[0]["inicio"]
 
-    filas_epg.append([dia_nombre, p_curr["inicio"], fin, p_curr["programa"], ""])
+    filas_epg.append([dia_nombre, p_curr["inicio"], fin, p_curr["programa"], p_curr["descripcion"]])
 
+# 5. Volcar en Google Sheets
 sheet.clear()
 sheet.update(range_name='A1', values=filas_epg)
-print(f"¡Éxito! Se actualizaron {len(filas_epg)-1} registros en Japan Motion.")
+print(f"¡Éxito! Se actualizaron {len(filas_epg)-1} registros desde /horarios en Japan Motion.")
