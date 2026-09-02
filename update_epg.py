@@ -2,6 +2,7 @@ import os
 import json
 import re
 from datetime import datetime
+import zoneinfo
 from bs4 import BeautifulSoup
 import gspread
 from google.oauth2.service_account import Credentials
@@ -68,7 +69,6 @@ with sync_playwright() as p:
 # 3. Procesamiento y Depuración
 soup = BeautifulSoup(html_content, "html.parser")
 
-# Capturar únicamente los tags <article> para evitar duplicación con divs contenedores
 articulos = soup.find_all("article")
 if not articulos:
     articulos = soup.find_all("div", class_=re.compile(r'schedule-item|program-card', re.I))
@@ -111,18 +111,19 @@ for art in articulos:
         "descripcion": desc
     })
 
-# 4. Asignación Secuencial de Días y Horarios de Fin
+# 4. Asignación Secuencial de Días considerando la Zona Horaria Local
 filas_epg = [
     ["Dia", "Inicio", "Fin", "Programa", "Descripcion"]
 ]
 
-# El primer día arranca con el día de hoy (ej. Martes)
-indice_dia = datetime.now().weekday()
+# Obtenemos la fecha exacta en zona horaria de Argentina (ART - UTC-3)
+tz_local = zoneinfo.ZoneInfo("America/Argentina/Buenos_Aires")
+indice_dia = datetime.now(tz_local).weekday()
 
 for i in range(len(programas_raw)):
     p_curr = programas_raw[i]
     
-    # Detectar el cruce de medianoche (ejemplo de 23:30 a 00:00 o de 23:00 a 02:00)
+    # Detectar el cruce de medianoche
     if i > 0:
         hora_prev = programas_raw[i-1]["inicio"]
         hora_curr = p_curr["inicio"]
