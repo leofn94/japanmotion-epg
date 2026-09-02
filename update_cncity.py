@@ -1,6 +1,7 @@
 import os
 import json
 import re
+import time
 from datetime import datetime
 import zoneinfo
 from bs4 import BeautifulSoup
@@ -24,20 +25,32 @@ client = gspread.authorize(credentials)
 
 SPREADSHEET_ID = "1JKs0R5aFs4uWMBFDAuVtf2-hDDYd87ZkibTqFV600Rs"
 
-# Abre o crea la pestaña CNCITY
-try:
-    sheet = client.open_by_key(SPREADSHEET_ID).worksheet("CNCITY")
-except Exception:
-    sheet = client.open_by_key(SPREADSHEET_ID).add_worksheet(title="CNCITY", rows=1000, cols=10)
+def abrir_sheet_con_reintento(spreadsheet_id, nombre_pestana=None, max_intentos=5):
+    for intento in range(1, max_intentos + 1):
+        try:
+            doc = client.open_by_key(spreadsheet_id)
+            if nombre_pestana:
+                try:
+                    return doc.worksheet(nombre_pestana)
+                except Exception:
+                    return doc.add_worksheet(title=nombre_pestana, rows=1000, cols=10)
+            return doc.sheet1
+        except gspread.exceptions.APIError as e:
+            code = getattr(e.response, "status_code", None)
+            if code in [500, 502, 503, 504] and intento < max_intentos:
+                espera = intento * 5
+                print(f"Aviso: Google API respondió con error {code}. Reintentando en {espera}s (Intento {intento}/{max_intentos})...")
+                time.sleep(espera)
+            else:
+                raise e
+
+sheet = abrir_sheet_con_reintento(SPREADSHEET_ID, "CNCITY")
 
 dias_mapa = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"]
 
 def limpiar_texto_programa(texto_raw):
-    # Eliminar duraciones tipo '23 min', '12 min'
     texto = re.sub(r'\b\d{1,3}\s*min\b', '', texto_raw, flags=re.I)
-    # Eliminar palabras/botones residuales del reproductor
     texto = re.sub(r'(Agendar|Google Calendar|Descargar|\.ics|18\+|13\+|TODOS)', '', texto, flags=re.I)
-    # Normalizar espacios
     return re.sub(r'\s+', ' ', texto).strip()
 
 url = "https://cncity.live/"
@@ -53,7 +66,6 @@ with sync_playwright() as p:
     page.goto(url, wait_until="networkidle", timeout=60000)
     page.wait_for_timeout(3000)
 
-    # 1. Abrir sección Grilla
     try:
         grilla_btn = page.get_by_text("GRILLA", exact=False).first
         if grilla_btn.is_visible():
@@ -62,7 +74,6 @@ with sync_playwright() as p:
     except Exception as e:
         print("Aviso al ingresar a Grilla:", e)
 
-    # 2. Seleccionar franja horaria Argentina
     try:
         arg_btn = page.get_by_text("ARGENTINA", exact=False).first
         if arg_btn.is_visible():
@@ -71,7 +82,6 @@ with sync_playwright() as p:
     except Exception as e:
         print("Aviso al seleccionar Argentina:", e)
 
-    # 3. Scroll progresivo
     for _ in range(3):
         page.evaluate("window.scrollBy(0, 800)")
         page.wait_for_timeout(1000)
@@ -79,9 +89,7 @@ with sync_playwright() as p:
     html_content = page.content()
     browser.close()
 
-# 4. Procesamiento
 soup = BeautifulSoup(html_content, "html.parser")
-
 bloques = soup.find_all("article")
 if not bloques:
     bloques = soup.find_all(["div", "tr", "li"], class_=re.compile(r'item|card|program|schedule|show|event', re.I))
@@ -93,8 +101,6 @@ programas_raw = []
 
 for b in bloques:
     texto_art = b.get_text(" ", strip=True)
-    
-    # Filtrar contenedores masivos con múltiples horarios (evita la 1ª fila basura)
     matches_hora = re.findall(r'\b\d{1,2}:\d{2}\b', texto_art)
     if len(matches_hora) > 2 or not matches_hora:
         continue
@@ -103,16 +109,12 @@ for b in bloques:
     if len(hora_ini) == 4:
         hora_ini = "0" + hora_ini
 
-    # Tomar TODO el texto restándole solo la hora de inicio
     texto_sin_hora = re.sub(r'^\d{1,2}:\d{2}\s*', '', texto_art)
-    
-    # Limpiar duraciones y caracteres sobrantes
     programa_completo = limpiar_texto_programa(texto_sin_hora)
 
     if not programa_completo or len(programa_completo) < 2:
         continue
 
-    # Evitar duplicados inmediatos
     if programas_raw and programas_raw[-1]["inicio"] == hora_ini and programas_raw[-1]["programa"] == programa_completo:
         continue
 
@@ -121,7 +123,6 @@ for b in bloques:
         "programa": programa_completo
     })
 
-# 5. Formatear lista final
 filas_epg = [
     ["Dia", "Inicio", "Fin", "Programa", "Descripcion"]
 ]
@@ -129,7 +130,6 @@ filas_epg = [
 for i in range(len(programas_raw)):
     p_curr = programas_raw[i]
     
-    # Control de paso a la medianoche
     if i > 0:
         hora_prev = programas_raw[i-1]["inicio"]
         hora_curr = p_curr["inicio"]
@@ -143,10 +143,8 @@ for i in range(len(programas_raw)):
     else:
         fin = programas_raw[0]["inicio"]
 
-    # Descripcion queda vacia ("")
     filas_epg.append([dia_nombre, p_curr["inicio"], fin, p_curr["programa"], ""])
 
-# 6. Volcar a Google Sheets
 sheet.clear()
 sheet.update(range_name='A1', values=filas_epg)
-print(f"¡Éxito! Se actualizaron {len(filas_epg)-1} registros. Todo el texto va en 'Programa' y 'Descripcion' queda vacía.")
+print(f"¡Éxito! Se actualizaron {len(filas_epg)-1} registros en CNCITY.")
