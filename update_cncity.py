@@ -24,22 +24,29 @@ client = gspread.authorize(credentials)
 
 SPREADSHEET_ID = "1JKs0R5aFs4uWMBFDAuVtf2-hDDYd87ZkibTqFV600Rs"
 
-# Abre o crea la pestaña de CNCity en el Spreadsheet
+# Abre o crea la pestaña CNCITY
 try:
     sheet = client.open_by_key(SPREADSHEET_ID).worksheet("CNCITY")
 except Exception:
-    # Si no existe la pestaña 'CNCITY', la crea automáticamente
     sheet = client.open_by_key(SPREADSHEET_ID).add_worksheet(title="CNCITY", rows=1000, cols=10)
 
 dias_mapa = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"]
 
-filas_epg = [
-    ["Dia", "Inicio", "Fin", "Programa", "Descripcion"]
-]
+def extraer_programa_y_descripcion(texto_raw):
+    texto = re.sub(r'(Agendar|Google Calendar|Descargar|\.ics|18\+|13\+|TODOS)', '', texto_raw, flags=re.I).strip()
+    if "—" in texto:
+        partes = texto.split("—", 1)
+        return partes[0].strip(), partes[1].strip()
+    match_ep = re.search(r'^(.*?(?:Ep\.|Episode|Cap\.|Capítulo)\s*\d+)(.*)$', texto, re.I)
+    if match_ep:
+        return match_ep.group(1).strip(), match_ep.group(2).strip()
+    partes = re.split(r'(?<=[a-z0-9])\s+(?=[A-Z0-9])', texto, maxsplit=1)
+    if len(partes) == 2:
+        return partes[0].strip(), partes[1].strip()
+    return texto[:35].strip(), texto.strip()
 
 url = "https://cncity.live/"
 
-# 2. Extracción interactiva con Playwright
 with sync_playwright() as p:
     browser = p.chromium.launch(headless=True)
     context = browser.new_context(
@@ -48,131 +55,107 @@ with sync_playwright() as p:
         user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
     )
     page = context.new_page()
-    page.goto(url, wait_until="domcontentloaded", timeout=60000)
+    page.goto(url, wait_until="networkidle", timeout=60000)
     page.wait_for_timeout(3000)
 
-    # 1. Hacer clic en la sección 'Grilla'
+    # 1. Abrir sección Grilla
     try:
-        grilla_btn = page.locator("text=/grilla/i").first
+        grilla_btn = page.get_by_text("GRILLA", exact=False).first
         if grilla_btn.is_visible():
             grilla_btn.click()
             page.wait_for_timeout(2000)
     except Exception as e:
-        print("Aviso al buscar sección Grilla:", e)
+        print("Aviso al ingresar a Grilla:", e)
 
-    # 2. Seleccionar la opción de 'Argentina'
+    # 2. Seleccionar franja horaria Argentina
     try:
-        arg_btn = page.locator("text=/argentina/i").first
+        arg_btn = page.get_by_text("ARGENTINA", exact=False).first
         if arg_btn.is_visible():
             arg_btn.click()
             page.wait_for_timeout(2000)
     except Exception as e:
         print("Aviso al seleccionar Argentina:", e)
 
-    # 3. Recorrer los días disponibles
-    # Buscamos botones o solapas de días
-    pestañas_dias = page.query_selector_all("button, a, [role='tab']")
-    
-    # Filtrar solo pestañas correspondientes a días o fechas
-    dias_validos = []
-    for elem in pestañas_dias:
-        txt = elem.inner_text().strip()
-        if any(d.lower() in txt.lower() for d in ["lunes", "martes", "miércoles", "miercoles", "jueves", "viernes", "sábado", "sabado", "domingo", "hoy"]):
-            dias_validos.append(elem)
-
-    if not dias_validos:
-        dias_validos = [None]
-
-    tz_local = zoneinfo.ZoneInfo("America/Argentina/Buenos_Aires")
-    dia_base_idx = datetime.now(tz_local).weekday()
-
-    programas_todos = []
-
-    for idx, btn_dia in enumerate(dias_validos):
-        dia_efectivo_base = dias_mapa[(dia_base_idx + idx) % 7]
-
-        if btn_dia:
-            try:
-                btn_dia.click()
-                page.wait_for_timeout(1500)
-            except Exception:
-                pass
-
-        # Scroll suave para forzar la carga de la grilla del día
-        page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+    # 3. Scroll progresivo para desplegar todo lo cargado dinámicamente
+    for _ in range(3):
+        page.evaluate("window.scrollBy(0, 800)")
         page.wait_for_timeout(1000)
 
-        html_content = page.content()
-        soup = BeautifulSoup(html_content, "html.parser")
-
-        # Buscar contenedores de ítems de programación
-        bloques = soup.find_all(["article", "tr", "li", "div"], class_=re.compile(r'item|card|program|schedule|show|event', re.I))
-
-        programas_dia = []
-        paso_medianoche = False
-
-        for b in bloques:
-            texto = b.get_text(" ", strip=True)
-            
-            # Buscar formato horario HH:MM
-            hora_match = re.search(r'\b\d{1,2}:\d{2}\b', texto)
-            if not hora_match:
-                continue
-
-            hora_ini = hora_match.group(0)
-            if len(hora_ini) == 4:
-                hora_ini = "0" + hora_ini
-
-            # Transición tras la medianoche
-            if len(programas_dia) > 0:
-                hora_prev = programas_dia[-1]["inicio"]
-                if hora_prev >= "20:00" and hora_ini < "06:00":
-                    paso_medianoche = True
-
-            dia_efectivo = dias_mapa[(dias_mapa.index(dia_efectivo_base) + 1) % 7] if paso_medianoche else dia_efectivo_base
-
-            # Extraer Título y Descripción
-            titulo_tag = b.find(["h2", "h3", "h4", "h5", "strong", "b", "span"], class_=re.compile(r'title|nombre|programa', re.I))
-            if titulo_tag:
-                titulo = titulo_tag.get_text(strip=True)
-                desc = texto.replace(titulo, "", 1)
-            else:
-                texto_limpio = re.sub(r'^\d{1,2}:\d{2}\s*', '', texto)
-                partes = texto_limpio.split("—", 1) if "—" in texto_limpio else [texto_limpio[:30], texto_limpio]
-                titulo = partes[0].strip()
-                desc = partes[1].strip() if len(partes) > 1 else texto_limpio.strip()
-
-            titulo = re.sub(r'^\d{1,2}:\d{2}\s*', '', titulo).strip()
-            desc = re.sub(r'\b\d{1,2}:\d{2}\b', '', desc).strip()
-
-            # Evitar duplicados inmediatos
-            if programas_dia and programas_dia[-1]["inicio"] == hora_ini and programas_dia[-1]["titulo"] == titulo:
-                continue
-
-            programas_dia.append({
-                "dia": dia_efectivo,
-                "inicio": hora_ini,
-                "titulo": titulo if titulo else "Programa",
-                "descripcion": desc
-            })
-
-        programas_todos.extend(programas_dia)
-
+    html_content = page.content()
     browser.close()
 
-# 3. Asignación de Horario de Fin
-for i in range(len(programas_todos)):
-    p_curr = programas_todos[i]
-    if i < len(programas_todos) - 1:
-        fin = programas_todos[i+1]["inicio"]
+# 4. Procesamiento de los datos reales del DOM
+soup = BeautifulSoup(html_content, "html.parser")
+
+bloques = soup.find_all("article")
+if not bloques:
+    bloques = soup.find_all(["div", "tr", "li"], class_=re.compile(r'item|card|program|schedule|show|event', re.I))
+
+# Determinamos el día inicial según la hora local de Argentina
+tz_local = zoneinfo.ZoneInfo("America/Argentina/Buenos_Aires")
+indice_dia = datetime.now(tz_local).weekday()
+
+programas_raw = []
+
+for b in bloques:
+    texto_art = b.get_text(" ", strip=True)
+    
+    hora_match = re.search(r'\b\d{1,2}:\d{2}\b', texto_art)
+    if not hora_match:
+        continue
+        
+    hora_ini = hora_match.group(0)
+    if len(hora_ini) == 4:
+        hora_ini = "0" + hora_ini
+
+    titulo_tag = b.find(["h2", "h3", "h4", "h5", "strong", "b"])
+    if titulo_tag:
+        titulo = titulo_tag.get_text(strip=True)
+        titulo = re.sub(r'^\d{1,2}:\d{2}\s*', '', titulo).strip()
+        desc = texto_art.replace(titulo, "", 1)
+        desc = re.sub(r'\b\d{1,2}:\d{2}\b', '', desc)
+        desc = re.sub(r'(Agendar|Google Calendar|Descargar|\.ics|18\+|13\+|TODOS)', '', desc, flags=re.I).strip()
     else:
-        fin = programas_todos[0]["inicio"]
+        texto_sin_hora = re.sub(r'^\d{1,2}:\d{2}\s*', '', texto_art)
+        titulo, desc = extraer_programa_y_descripcion(texto_sin_hora)
 
-    fila = [p_curr["dia"], p_curr["inicio"], fin, p_curr["titulo"], p_curr["descripcion"]]
-    if fila not in filas_epg:
-        filas_epg.append(fila)
+    if not titulo:
+        titulo = "Programa"
 
-# 4. Volcado a Google Sheets en la pestaña CNCITY
+    if programas_raw and programas_raw[-1]["inicio"] == hora_ini and programas_raw[-1]["titulo"] == titulo:
+        continue
+
+    programas_raw.append({
+        "inicio": hora_ini,
+        "titulo": titulo,
+        "descripcion": desc
+    })
+
+# 5. Formatear lista final con cálculo automático de día y hora fin
+filas_epg = [
+    ["Dia", "Inicio", "Fin", "Programa", "Descripcion"]
+]
+
+for i in range(len(programas_raw)):
+    p_curr = programas_raw[i]
+    
+    # Si la hora pasa de noche (>=20:00) a madrugada (<06:00), avanzamos el día automáticamente
+    if i > 0:
+        hora_prev = programas_raw[i-1]["inicio"]
+        hora_curr = p_curr["inicio"]
+        if hora_prev >= "20:00" and hora_curr < "06:00":
+            indice_dia = (indice_dia + 1) % 7
+
+    dia_nombre = dias_mapa[indice_dia]
+
+    if i < len(programas_raw) - 1:
+        fin = programas_raw[i+1]["inicio"]
+    else:
+        fin = programas_raw[0]["inicio"]
+
+    filas_epg.append([dia_nombre, p_curr["inicio"], fin, p_curr["titulo"], p_curr["descripcion"]])
+
+# 6. Volcar a Google Sheets
 sheet.clear()
 sheet.update(range_name='A1', values=filas_epg)
-print(f"¡Éxito! Se actualizaron {len(filas_epg)-1} registros para CN City.")
+print(f"¡Éxito! Se cargaron {len(filas_epg)-1} programas reales en la pestaña CNCITY.")
