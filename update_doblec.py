@@ -47,17 +47,13 @@ def abrir_sheet_con_reintento(spreadsheet_id, nombre_pestana=None, max_intentos=
 
 sheet = abrir_sheet_con_reintento(SPREADSHEET_ID, NOMBRE_PESTANA)
 
-dias_mapa = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"]
-
 def convertir_horario_peru_a_art(hora_str_peru, sumadd=2):
     """
-    Convierte cadenas como '7:00 am', '1:30 pm', '11:30 pm' o '07:00'
-    de Hora de Perú (UTC-5) a Hora de Argentina (UTC-3), sumando 2 horas.
-    Retorna (hora_formateada_HH:MM, cruzo_dia_bool)
+    Convierte hora de Perú (UTC-5) a Hora de Argentina (UTC-3) sumando 2 horas.
+    Retorna tuple: (hora_formateada_HH:MM, cambio_de_dia_boolean)
     """
     s = hora_str_peru.strip().lower()
     
-    # Extraer horas y minutos
     match = re.search(r'(\d{1,2}):(\d{2})\s*(am|pm)?', s)
     if not match:
         return None, False
@@ -72,7 +68,6 @@ def convertir_horario_peru_a_art(hora_str_peru, sumadd=2):
         elif ampm == 'am' and h == 12:
             h = 0
 
-    # Sumar 2 horas (Perú a Argentina)
     dt_peru = datetime(2026, 1, 1, h, m)
     dt_art = dt_peru + timedelta(hours=sumadd)
 
@@ -95,7 +90,6 @@ with sync_playwright() as p:
     page.goto(url, wait_until="domcontentloaded", timeout=60000)
     page.wait_for_timeout(4000)
 
-    # Identificar los botones de pestañas (Lunes a Viernes, Sábado, Domingo)
     botones = page.query_selector_all("button, [role='tab'], .vc_tta-tab, .elementor-tab-title, a")
     
     tabs_encontradas = []
@@ -104,7 +98,6 @@ with sync_playwright() as p:
         if re.search(r'(Lunes|Viernes|Sábado|Sabado|Domingo)', txt, re.I):
             tabs_encontradas.append((txt, b))
 
-    # Si hay pestañas interactivas, las recorremos; de lo contrario procesamos el HTML cargado
     if tabs_encontradas:
         for txt_tab, btn_elem in tabs_encontradas:
             try:
@@ -116,16 +109,14 @@ with sync_playwright() as p:
             html_content = page.content()
             soup = BeautifulSoup(html_content, "html.parser")
             
-            # Mapear qué días representa la pestaña
-            dias_bloque = []
+            # Etiqueta única por bloque
             if "sabado" in txt_tab.lower() or "sábado" in txt_tab.lower():
-                dias_bloque = ["Sábado"]
+                etiqueta_dia = "Sábado"
             elif "domingo" in txt_tab.lower():
-                dias_bloque = ["Domingo"]
+                etiqueta_dia = "Domingo"
             else:
-                dias_bloque = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes"]
+                etiqueta_dia = "Weekdays"  # Agrupa de Lunes a Viernes
 
-            # Extraer filas de tablas
             filas_tabla = soup.find_all("tr")
             for tr in filas_tabla:
                 tds = tr.find_all(["td", "th"])
@@ -135,29 +126,8 @@ with sync_playwright() as p:
                     col_clas = tds[2].get_text(strip=True) if len(tds) > 2 else ""
 
                     if re.search(r'\d{1,2}:\d{2}', col_hora) and col_prog.lower() != "programa":
-                        for dia_nombre in dias_bloque:
-                            programas_totales.append({
-                                "dia": dia_nombre,
-                                "hora_raw": col_hora,
-                                "programa": col_prog,
-                                "clasificacion": col_clas
-                            })
-    else:
-        # Extraer directo si toda la programación está renderizada en una sola tabla/vista
-        html_content = page.content()
-        soup = BeautifulSoup(html_content, "html.parser")
-        filas_tabla = soup.find_all("tr")
-        for tr in filas_tabla:
-            tds = tr.find_all(["td", "th"])
-            if len(tds) >= 2:
-                col_hora = tds[0].get_text(strip=True)
-                col_prog = tds[1].get_text(strip=True)
-                col_clas = tds[2].get_text(strip=True) if len(tds) > 2 else ""
-
-                if re.search(r'\d{1,2}:\d{2}', col_hora) and col_prog.lower() != "programa":
-                    for dia_nombre in ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes"]:
                         programas_totales.append({
-                            "dia": dia_nombre,
+                            "dia": etiqueta_dia,
                             "hora_raw": col_hora,
                             "programa": col_prog,
                             "clasificacion": col_clas
@@ -165,26 +135,23 @@ with sync_playwright() as p:
 
     browser.close()
 
-# 3. Procesar horarios, conversión a Argentina (+2h) y ajuste de rangos
+# 3. Post-procesamiento y conversión
 filas_epg = [
     ["Dia", "Inicio", "Fin", "Programa", "Descripcion"]
 ]
 
 for p in programas_totales:
     col_hora = p["hora_raw"]
-    
-    # Manejar rangos tipo "7:00 – 7:30 am" o horas únicas "7:00 am"
     partes = re.split(r'[–\-–]', col_hora)
     
     hora_ini_peru = partes[0].strip()
     hora_fin_peru = partes[1].strip() if len(partes) > 1 else ""
 
-    # Asegurar sufijo am/pm en el inicio si solo está en el fin
     if hora_fin_peru and re.search(r'(am|pm)', hora_fin_peru, re.I) and not re.search(r'(am|pm)', hora_ini_peru, re.I):
         sufijo = re.search(r'(am|pm)', hora_fin_peru, re.I).group(0)
         hora_ini_peru += f" {sufijo}"
 
-    ini_art, _ = convertir_horario_peru_a_art(hora_ini_peru, sumadd=2)
+    ini_art, cruzo_ini = convertir_horario_peru_a_art(hora_ini_peru, sumadd=2)
     fin_art, _ = convertir_horario_peru_a_art(hora_fin_peru, sumadd=2) if hora_fin_peru else (None, False)
 
     if not ini_art:
@@ -200,9 +167,9 @@ for p in programas_totales:
         desc
     ])
 
-# Completar horas de Fin vacías con la hora de inicio del siguiente programa
+# Completar horarios de Fin faltantes
 for i in range(1, len(filas_epg) - 1):
-    if not filas_epg[i][2]:  # Fin vacío
+    if not filas_epg[i][2]:
         if filas_epg[i][0] == filas_epg[i+1][0]:
             filas_epg[i][2] = filas_epg[i+1][1]
         else:
@@ -211,7 +178,7 @@ for i in range(1, len(filas_epg) - 1):
 if len(filas_epg) > 1 and not filas_epg[-1][2]:
     filas_epg[-1][2] = "00:00"
 
-# 4. Volcar a Google Sheets
+# 4. Volcar en Google Sheets
 sheet.clear()
 sheet.update(range_name='A1', values=filas_epg)
-print(f"¡Éxito! Se actualizaron {len(filas_epg)-1} registros para Doble C convertidos a Hora de Argentina.")
+print(f"¡Éxito! Se guardaron {len(filas_epg)-1} bloques con la etiqueta Weekdays para los programas diarios.")
