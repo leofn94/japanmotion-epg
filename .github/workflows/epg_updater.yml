@@ -45,4 +45,9 @@ jobs:
         env:
           GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
         run: python update_janimotion.py
+
+      - name: Ejecutar script de Doble C
+        env:
+          GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
+        run: python update_doblec.py
         
