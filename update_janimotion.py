@@ -2,7 +2,7 @@ import os
 import json
 import time
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 import zoneinfo
 import gspread
 from google.oauth2.service_account import Credentials
@@ -23,7 +23,6 @@ credentials_info = json.loads(gcp_key)
 credentials = Credentials.from_service_account_info(credentials_info, scopes=SCOPES)
 client = gspread.authorize(credentials)
 
-# Mismo archivo central
 SPREADSHEET_ID = "1JKs0R5aFs4uWMBFDAuVtf2-hDDYd87ZkibTqFV600Rs"
 NOMBRE_PESTANA = "JANI"
 
@@ -48,10 +47,14 @@ def abrir_sheet_con_reintento(spreadsheet_id, nombre_pestana=None, max_intentos=
 
 sheet = abrir_sheet_con_reintento(SPREADSHEET_ID, NOMBRE_PESTANA)
 
-dias_mapa = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"]
+dias_semana_esp = ["Lunes", "Martes", "Miércoles", "Jueves", "Viernes", "Sábado", "Domingo"]
 
-# 2. Scraping Web apuntando a /schedule de Janimotion
+# 2. Scraping Web navegando por pestañas de días
 url = "https://janimotion.com/schedule"
+programas_totales = []
+
+tz_local = zoneinfo.ZoneInfo("America/Argentina/Buenos_Aires")
+fecha_base = datetime.now(tz_local)
 
 with sync_playwright() as p:
     browser = p.chromium.launch(headless=True)
@@ -64,80 +67,138 @@ with sync_playwright() as p:
     page.goto(url, wait_until="networkidle", timeout=60000)
     page.wait_for_timeout(3000)
 
-    for _ in range(3):
-        page.evaluate("window.scrollBy(0, 800)")
-        page.wait_for_timeout(1000)
+    # Identificar botones de los días (Hoy / Martes / Miércoles...)
+    botones_dias = page.query_selector_all("button, [role='tab'], div.cursor-pointer, a")
+    
+    # Filtrar solo botones que representen los días
+    tabs_validos = []
+    for btn in botones_dias:
+        txt = btn.inner_text().strip()
+        if re.search(r'(Hoy|Lunes|Martes|Miércoles|Jueves|Viernes|Sábado|Domingo|\d{1,2}\s+de\s+\w+)', txt, re.I):
+            tabs_validos.append(btn)
 
-    html_content = page.content()
+    # Si no encontró por elementos sueltos, buscar dentro del contenedor principal de la grilla
+    if not tabs_validos:
+        tabs_validos = page.query_selector_all(".flex.gap-4 button, header button, div.flex > div")
+
+    # Extraer contenido día por día
+    cant_dias = max(1, len(tabs_validos))
+    
+    for idx in range(cant_dias):
+        fecha_dia = fecha_base + timedelta(days=idx)
+        nombre_dia = dias_semana_esp[fecha_dia.weekday()]
+
+        if idx < len(tabs_validos):
+            try:
+                tabs_validos[idx].click()
+                page.wait_for_timeout(1500)
+            except Exception:
+                pass
+
+        # Scroll para forzar lazy-loading si existe
+        page.evaluate("window.scrollBy(0, 800)")
+        page.wait_for_timeout(500)
+
+        html_content = page.content()
+        soup = BeautifulSoup(html_content, "html.parser")
+
+        bloques = soup.find_all("article")
+        if not bloques:
+            bloques = soup.find_all("div", class_=re.compile(r'card|item|program|show|event|schedule', re.I))
+
+        # Recorrer programas del día
+        for b in bloques:
+            texto_completo = b.get_text(" ", strip=True)
+            if not texto_completo or len(texto_completo) < 5:
+                continue
+
+            # Extraer Hora (manejar casos de programa en vivo "AHORA")
+            match_hora = re.search(r'\b\d{1,2}:\d{2}\b', texto_completo)
+            if match_hora:
+                hora_str = match_hora.group(0).zfill(5)
+            elif "AHORA" in texto_completo.upper():
+                hora_str = "AHORA"
+            else:
+                continue
+
+            # Extraer Título (buscando tags h1, h2, h3, h4, strong o b)
+            elem_titulo = b.find(["h1", "h2", "h3", "h4", "h5", "strong", "b"])
+            if elem_titulo:
+                titulo = elem_titulo.get_text(strip=True)
+            else:
+                # Si no hay etiqueta de encabezado, tomar la primera línea
+                lineas = [l.strip() for l in b.get_text("\n", strip=True).split("\n") if l.strip()]
+                lineas_sin_hora = [l for l in lineas if not re.search(r'^\d{1,2}:\d{2}$|^AHORA$', l, re.I)]
+                titulo = lineas_sin_hora[0] if lineas_sin_hora else "Programa sin título"
+
+            # Extraer Episodio y Descripción
+            parrafos = b.find_all(["p", "span", "div"])
+            textos_p = [p.get_text(strip=True) for p in parrafos if p.get_text(strip=True)]
+            
+            # Limpiar textos de UI y horas
+            descriptores = []
+            for t in textos_p:
+                if t != titulo and not re.search(r'^\d{1,2}:\d{2}$|^AHORA$|^\+\d{1,2}$|^Agendar|^Google', t, re.I):
+                    if t not in descriptores:
+                        descriptores.append(t)
+
+            descripcion_final = " ".join(descriptores).strip()
+
+            programas_totales.append({
+                "dia": nombre_dia,
+                "inicio": hora_str,
+                "programa": titulo,
+                "descripcion": descripcion_final
+            })
+
     browser.close()
 
-# 3. Extracción y Separación de Título vs Descripción
-soup = BeautifulSoup(html_content, "html.parser")
-bloques = soup.find_all("article")
-if not bloques:
-    bloques = soup.find_all(["div", "tr", "li"], class_=re.compile(r'item|card|program|schedule|show|event', re.I))
+# 3. Post-procesamiento y cálculo de horarios (Fin de programa y fijar "AHORA")
+programas_procesados = []
 
-tz_local = zoneinfo.ZoneInfo("America/Argentina/Buenos_Aires")
-indice_dia = datetime.now(tz_local).weekday()
-
-programas_raw = []
-
-for b in bloques:
-    texto_art = b.get_text("\n", strip=True)
-    lineas = [l.strip() for l in texto_art.split("\n") if l.strip()]
-
-    hora_ini = None
-    lineas_filtradas = []
+for i in range(len(programas_totales)):
+    p_curr = programas_totales[i]
     
-    for l in lineas:
-        match_h = re.search(r'\b\d{1,2}:\d{2}\b', l)
-        if match_h and not hora_ini:
-            hora_ini = match_h.group(0)
-            if len(hora_ini) == 4:
-                hora_ini = "0" + hora_ini
+    # Si la hora era "AHORA", interpolar o estimar según el programa previo/siguiente
+    if p_curr["inicio"] == "AHORA":
+        if i > 0 and programas_totales[i-1]["dia"] == p_curr["dia"] and programas_totales[i-1]["inicio"] != "AHORA":
+            # Usar la hora del anterior si no es determinable
+            p_curr["inicio"] = programas_totales[i-1]["inicio"]
+        elif i < len(programas_totales) - 1 and programas_totales[i+1]["inicio"] != "AHORA":
+            p_curr["inicio"] = programas_totales[i+1]["inicio"]
         else:
-            if not re.search(r'^(Agendar|Google Calendar|Descargar|\.ics|18\+|13\+|TODOS|\d{1,3}\s*min)$', l, re.I):
-                lineas_filtradas.append(l)
+            p_curr["inicio"] = "00:00"
 
-    if not hora_ini or not lineas_filtradas:
-        continue
+    # Determinar hora de fin
+    if i < len(programas_totales) - 1:
+        fin_str = programas_totales[i+1]["inicio"]
+        if fin_str == "AHORA":
+            fin_str = p_curr["inicio"]
+    else:
+        fin_str = "00:00"
 
-    titulo = lineas_filtradas[0]
-    descripcion = " ".join(lineas_filtradas[1:]).strip() if len(lineas_filtradas) > 1 else ""
+    # Evitar duplicados consecutivos exactos
+    if programas_procesados:
+        p_prev = programas_procesados[-1]
+        if p_prev["dia"] == p_curr["dia"] and p_prev["inicio"] == p_curr["inicio"] and p_prev["programa"] == p_curr["programa"]:
+            continue
 
-    if programas_raw and programas_raw[-1]["inicio"] == hora_ini and programas_raw[-1]["programa"] == titulo:
-        continue
-
-    programas_raw.append({
-        "inicio": hora_ini,
-        "programa": titulo,
-        "descripcion": descripcion
+    programas_procesados.append({
+        "dia": p_curr["dia"],
+        "inicio": p_curr["inicio"],
+        "fin": fin_str,
+        "programa": p_curr["programa"],
+        "descripcion": p_curr["descripcion"]
     })
 
-# 4. Formatear grilla EPG
+# 4. Formatear y Volcar en Google Sheets
 filas_epg = [
     ["Dia", "Inicio", "Fin", "Programa", "Descripcion"]
 ]
 
-for i in range(len(programas_raw)):
-    p_curr = programas_raw[i]
-    
-    if i > 0:
-        hora_prev = programas_raw[i-1]["inicio"]
-        hora_curr = p_curr["inicio"]
-        if hora_prev >= "20:00" and hora_curr < "06:00":
-            indice_dia = (indice_dia + 1) % 7
+for p in programas_procesados:
+    filas_epg.append([p["dia"], p["inicio"], p["fin"], p["programa"], p["descripcion"]])
 
-    dia_nombre = dias_mapa[indice_dia]
-
-    if i < len(programas_raw) - 1:
-        fin = programas_raw[i+1]["inicio"]
-    else:
-        fin = programas_raw[0]["inicio"]
-
-    filas_epg.append([dia_nombre, p_curr["inicio"], fin, p_curr["programa"], p_curr["descripcion"]])
-
-# 5. Volcar en Google Sheets (Pestana 'JANI')
 sheet.clear()
 sheet.update(range_name='A1', values=filas_epg)
-print(f"¡Éxito! Se actualizaron {len(filas_epg)-1} registros desde /schedule en Janimotion para la pestaña JANI.")
+print(f"¡Éxito! Se actualizaron {len(filas_epg)-1} programas en Janimotion abarcando todos los días.")
