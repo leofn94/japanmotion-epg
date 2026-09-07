@@ -40,3 +40,9 @@ jobs:
         env:
           GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
         run: python update_usa_schedule.py
+
+      - name: Ejecutar script de Janimotion
+        env:
+          GCP_SA_KEY: ${{ secrets.GCP_SA_KEY }}
+        run: python update_janimotion.py
+        
