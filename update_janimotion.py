@@ -64,8 +64,10 @@ with sync_playwright() as p:
         user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
     )
     page = context.new_page()
-    page.goto(url, wait_until="networkidle", timeout=60000)
-    page.wait_for_timeout(3000)
+    
+    # Cambiado a domcontentloaded para evitar time out por peticiones residuales
+    page.goto(url, wait_until="domcontentloaded", timeout=60000)
+    page.wait_for_timeout(5000)
 
     # Identificar botones de los días
     botones_dias = page.query_selector_all("button, [role='tab'], div.cursor-pointer, a")
@@ -87,7 +89,7 @@ with sync_playwright() as p:
         if idx < len(tabs_validos):
             try:
                 tabs_validos[idx].click()
-                page.wait_for_timeout(1500)
+                page.wait_for_timeout(2000)
             except Exception:
                 pass
 
@@ -124,7 +126,7 @@ with sync_playwright() as p:
             if not hora_str or not lineas_sin_hora:
                 continue
 
-            # 2. Determinar Título (Primera línea o etiqueta de encabezado)
+            # 2. Determinar Título
             elem_titulo = b.find(["h1", "h2", "h3", "h4", "h5", "strong", "b"])
             if elem_titulo and elem_titulo.get_text(strip=True):
                 titulo = elem_titulo.get_text(strip=True)
@@ -134,11 +136,8 @@ with sync_playwright() as p:
             # 3. Filtrar y Desduplicar la Descripción
             partes_desc = []
             for l in lineas_sin_hora:
-                # Omitir si es idéntico al título o si la línea contiene sólo el título
                 if l.lower() == titulo.lower():
                     continue
-                
-                # Evitar frases o fragmentos repetidos
                 if l not in partes_desc:
                     partes_desc.append(l)
 
