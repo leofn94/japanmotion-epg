@@ -67,21 +67,17 @@ with sync_playwright() as p:
     page.goto(url, wait_until="networkidle", timeout=60000)
     page.wait_for_timeout(3000)
 
-    # Identificar botones de los días (Hoy / Martes / Miércoles...)
+    # Identificar botones de los días
     botones_dias = page.query_selector_all("button, [role='tab'], div.cursor-pointer, a")
-    
-    # Filtrar solo botones que representen los días
     tabs_validos = []
     for btn in botones_dias:
         txt = btn.inner_text().strip()
         if re.search(r'(Hoy|Lunes|Martes|Miércoles|Jueves|Viernes|Sábado|Domingo|\d{1,2}\s+de\s+\w+)', txt, re.I):
             tabs_validos.append(btn)
 
-    # Si no encontró por elementos sueltos, buscar dentro del contenedor principal de la grilla
     if not tabs_validos:
         tabs_validos = page.query_selector_all(".flex.gap-4 button, header button, div.flex > div")
 
-    # Extraer contenido día por día
     cant_dias = max(1, len(tabs_validos))
     
     for idx in range(cant_dias):
@@ -95,7 +91,6 @@ with sync_playwright() as p:
             except Exception:
                 pass
 
-        # Scroll para forzar lazy-loading si existe
         page.evaluate("window.scrollBy(0, 800)")
         page.wait_for_timeout(500)
 
@@ -106,43 +101,48 @@ with sync_playwright() as p:
         if not bloques:
             bloques = soup.find_all("div", class_=re.compile(r'card|item|program|show|event|schedule', re.I))
 
-        # Recorrer programas del día
         for b in bloques:
-            texto_completo = b.get_text(" ", strip=True)
-            if not texto_completo or len(texto_completo) < 5:
+            texto_raw = b.get_text("\n", strip=True)
+            lineas = [l.strip() for l in texto_raw.split("\n") if l.strip()]
+
+            if not lineas:
                 continue
 
-            # Extraer Hora (manejar casos de programa en vivo "AHORA")
-            match_hora = re.search(r'\b\d{1,2}:\d{2}\b', texto_completo)
-            if match_hora:
-                hora_str = match_hora.group(0).zfill(5)
-            elif "AHORA" in texto_completo.upper():
-                hora_str = "AHORA"
-            else:
+            # 1. Determinar Hora de Inicio
+            hora_str = None
+            lineas_sin_hora = []
+
+            for l in lineas:
+                match_h = re.search(r'\b\d{1,2}:\d{2}\b', l)
+                if match_h and not hora_str:
+                    hora_str = match_h.group(0).zfill(5)
+                elif re.search(r'^AHORA$', l, re.I) and not hora_str:
+                    hora_str = "AHORA"
+                elif not re.search(r'^\d{1,2}:\d{2}$|^AHORA$|^\+\d{1,2}$|^(Agendar|Google Calendar|Descargar|\.ics)$', l, re.I):
+                    lineas_sin_hora.append(l)
+
+            if not hora_str or not lineas_sin_hora:
                 continue
 
-            # Extraer Título (buscando tags h1, h2, h3, h4, strong o b)
+            # 2. Determinar Título (Primera línea o etiqueta de encabezado)
             elem_titulo = b.find(["h1", "h2", "h3", "h4", "h5", "strong", "b"])
-            if elem_titulo:
+            if elem_titulo and elem_titulo.get_text(strip=True):
                 titulo = elem_titulo.get_text(strip=True)
             else:
-                # Si no hay etiqueta de encabezado, tomar la primera línea
-                lineas = [l.strip() for l in b.get_text("\n", strip=True).split("\n") if l.strip()]
-                lineas_sin_hora = [l for l in lineas if not re.search(r'^\d{1,2}:\d{2}$|^AHORA$', l, re.I)]
-                titulo = lineas_sin_hora[0] if lineas_sin_hora else "Programa sin título"
+                titulo = lineas_sin_hora[0]
 
-            # Extraer Episodio y Descripción
-            parrafos = b.find_all(["p", "span", "div"])
-            textos_p = [p.get_text(strip=True) for p in parrafos if p.get_text(strip=True)]
-            
-            # Limpiar textos de UI y horas
-            descriptores = []
-            for t in textos_p:
-                if t != titulo and not re.search(r'^\d{1,2}:\d{2}$|^AHORA$|^\+\d{1,2}$|^Agendar|^Google', t, re.I):
-                    if t not in descriptores:
-                        descriptores.append(t)
+            # 3. Filtrar y Desduplicar la Descripción
+            partes_desc = []
+            for l in lineas_sin_hora:
+                # Omitir si es idéntico al título o si la línea contiene sólo el título
+                if l.lower() == titulo.lower():
+                    continue
+                
+                # Evitar frases o fragmentos repetidos
+                if l not in partes_desc:
+                    partes_desc.append(l)
 
-            descripcion_final = " ".join(descriptores).strip()
+            descripcion_final = " ".join(partes_desc).strip()
 
             programas_totales.append({
                 "dia": nombre_dia,
@@ -153,23 +153,20 @@ with sync_playwright() as p:
 
     browser.close()
 
-# 3. Post-procesamiento y cálculo de horarios (Fin de programa y fijar "AHORA")
+# 3. Post-procesamiento
 programas_procesados = []
 
 for i in range(len(programas_totales)):
     p_curr = programas_totales[i]
     
-    # Si la hora era "AHORA", interpolar o estimar según el programa previo/siguiente
     if p_curr["inicio"] == "AHORA":
         if i > 0 and programas_totales[i-1]["dia"] == p_curr["dia"] and programas_totales[i-1]["inicio"] != "AHORA":
-            # Usar la hora del anterior si no es determinable
             p_curr["inicio"] = programas_totales[i-1]["inicio"]
         elif i < len(programas_totales) - 1 and programas_totales[i+1]["inicio"] != "AHORA":
             p_curr["inicio"] = programas_totales[i+1]["inicio"]
         else:
             p_curr["inicio"] = "00:00"
 
-    # Determinar hora de fin
     if i < len(programas_totales) - 1:
         fin_str = programas_totales[i+1]["inicio"]
         if fin_str == "AHORA":
@@ -177,7 +174,6 @@ for i in range(len(programas_totales)):
     else:
         fin_str = "00:00"
 
-    # Evitar duplicados consecutivos exactos
     if programas_procesados:
         p_prev = programas_procesados[-1]
         if p_prev["dia"] == p_curr["dia"] and p_prev["inicio"] == p_curr["inicio"] and p_prev["programa"] == p_curr["programa"]:
@@ -191,7 +187,7 @@ for i in range(len(programas_totales)):
         "descripcion": p_curr["descripcion"]
     })
 
-# 4. Formatear y Volcar en Google Sheets
+# 4. Volcar a Google Sheets
 filas_epg = [
     ["Dia", "Inicio", "Fin", "Programa", "Descripcion"]
 ]
@@ -201,4 +197,4 @@ for p in programas_procesados:
 
 sheet.clear()
 sheet.update(range_name='A1', values=filas_epg)
-print(f"¡Éxito! Se actualizaron {len(filas_epg)-1} programas en Janimotion abarcando todos los días.")
+print(f"¡Éxito! Se actualizaron {len(filas_epg)-1} registros sin texto duplicado.")
