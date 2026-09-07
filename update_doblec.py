@@ -47,20 +47,30 @@ def abrir_sheet_con_reintento(spreadsheet_id, nombre_pestana=None, max_intentos=
 
 sheet = abrir_sheet_con_reintento(SPREADSHEET_ID, NOMBRE_PESTANA)
 
-def convertir_horario_peru_a_art(hora_str_peru, sumadd=2):
+def parsear_hora_peru(hora_str, es_hora_fin=False, ampm_fin=None):
     """
-    Convierte hora de Perú (UTC-5) a Hora de Argentina (UTC-3) sumando 2 horas.
-    Retorna tuple: (hora_formateada_HH:MM, cambio_de_dia_boolean)
+    Parsea cadenas como '11:00', '11:30 am', '12:00 pm', '02:30 am' en Hora de Perú.
+    Maneja la ambigüedad de mediodía/medianoche correctamente.
     """
-    s = hora_str_peru.strip().lower()
-    
+    s = hora_str.strip().lower()
     match = re.search(r'(\d{1,2}):(\d{2})\s*(am|pm)?', s)
     if not match:
-        return None, False
+        return None
 
     h = int(match.group(1))
     m = int(match.group(2))
     ampm = match.group(3)
+
+    # Si la hora inicial no especifica am/pm, inferir del sufijo fin
+    if not ampm and ampm_fin:
+        if not es_hora_fin:
+            # Ej: 11:00 - 12:00 pm -> 11:00 es AM
+            if h == 11 and ampm_fin == 'pm':
+                ampm = 'am'
+            elif h == 11 and ampm_fin == 'am':
+                ampm = 'pm'
+            else:
+                ampm = ampm_fin
 
     if ampm:
         if ampm == 'pm' and h < 12:
@@ -68,14 +78,16 @@ def convertir_horario_peru_a_art(hora_str_peru, sumadd=2):
         elif ampm == 'am' and h == 12:
             h = 0
 
+    return h, m
+
+def convertir_peru_a_art(h, m):
+    """Suma 2 horas (Perú UTC-5 a Argentina UTC-3)"""
     dt_peru = datetime(2026, 1, 1, h, m)
-    dt_art = dt_peru + timedelta(hours=sumadd)
-
-    cruzo_dia = dt_art.day > 1
-    return dt_art.strftime("%H:%M"), cruzo_dia
+    dt_art = dt_peru + timedelta(hours=2)
+    return dt_art.strftime("%H:%M")
 
 
-# 2. Scraping Web navegando por las 3 pestañas
+# 2. Scraping Web distinguiendo las 3 pestañas dinámicas
 url = "https://doblec.com.pe/programacion/"
 programas_totales = []
 
@@ -88,54 +100,66 @@ with sync_playwright() as p:
     )
     page = context.new_page()
     page.goto(url, wait_until="domcontentloaded", timeout=60000)
-    page.wait_for_timeout(4000)
+    page.wait_for_timeout(3000)
 
-    botones = page.query_selector_all("button, [role='tab'], .vc_tta-tab, .elementor-tab-title, a")
-    
-    tabs_encontradas = []
-    for b in botones:
-        txt = b.inner_text().strip()
-        if re.search(r'(Lunes|Viernes|Sábado|Sabado|Domingo)', txt, re.I):
-            tabs_encontradas.append((txt, b))
+    html_content = page.content()
+    soup = BeautifulSoup(html_content, "html.parser")
 
-    if tabs_encontradas:
-        for txt_tab, btn_elem in tabs_encontradas:
-            try:
-                btn_elem.click()
-                page.wait_for_timeout(1500)
-            except Exception:
-                pass
+    # Identificar contenedores o pestañas de Elementor
+    tab_containers = soup.find_all(["div", "section"], class_=re.compile(r'elementor-tab-content|vc_tta-panel|tab-pane|tab-content', re.I))
 
-            html_content = page.content()
-            soup = BeautifulSoup(html_content, "html.parser")
-            
-            # Etiqueta única por bloque
-            if "sabado" in txt_tab.lower() or "sábado" in txt_tab.lower():
-                etiqueta_dia = "Sábado"
-            elif "domingo" in txt_tab.lower():
-                etiqueta_dia = "Domingo"
-            else:
-                etiqueta_dia = "Weekdays"  # Agrupa de Lunes a Viernes
+    # Definir mapeo de bloques si existen paneles separados
+    if len(tab_containers) >= 3:
+        bloques_mapa = [
+            ("Weekdays", tab_containers[0]),
+            ("Sábado", tab_containers[1]),
+            ("Domingo", tab_containers[2])
+        ]
+    else:
+        # Si no los encuentra por contenedor, hacer clic interactivo y extraer selector activo
+        bloques_mapa = []
+        botones = page.query_selector_all(".elementor-tab-title, .vc_tta-tab, button, [role='tab']")
+        
+        for b in botones:
+            txt = b.inner_text().strip()
+            if re.search(r'Lunes|Viernes', txt, re.I):
+                b.click()
+                page.wait_for_timeout(1000)
+                s = BeautifulSoup(page.content(), "html.parser")
+                bloques_mapa.append(("Weekdays", s))
+            elif re.search(r'Sábado|Sabado', txt, re.I):
+                b.click()
+                page.wait_for_timeout(1000)
+                s = BeautifulSoup(page.content(), "html.parser")
+                bloques_mapa.append(("Sábado", s))
+            elif re.search(r'Domingo', txt, re.I):
+                b.click()
+                page.wait_for_timeout(1000)
+                s = BeautifulSoup(page.content(), "html.parser")
+                bloques_mapa.append(("Domingo", s))
 
-            filas_tabla = soup.find_all("tr")
-            for tr in filas_tabla:
-                tds = tr.find_all(["td", "th"])
-                if len(tds) >= 2:
-                    col_hora = tds[0].get_text(strip=True)
-                    col_prog = tds[1].get_text(strip=True)
-                    col_clas = tds[2].get_text(strip=True) if len(tds) > 2 else ""
+    # Recorrer cada pestaña con su DOM específico
+    for etiqueta_dia, contenedor in bloques_mapa:
+        filas_tabla = contenedor.find_all("tr")
+        
+        for tr in filas_tabla:
+            tds = tr.find_all(["td", "th"])
+            if len(tds) >= 2:
+                col_hora = tds[0].get_text(strip=True)
+                col_prog = tds[1].get_text(strip=True)
+                col_clas = tds[2].get_text(strip=True) if len(tds) > 2 else ""
 
-                    if re.search(r'\d{1,2}:\d{2}', col_hora) and col_prog.lower() != "programa":
-                        programas_totales.append({
-                            "dia": etiqueta_dia,
-                            "hora_raw": col_hora,
-                            "programa": col_prog,
-                            "clasificacion": col_clas
-                        })
+                if re.search(r'\d{1,2}:\d{2}', col_hora) and col_prog.lower() != "programa":
+                    programas_totales.append({
+                        "dia": etiqueta_dia,
+                        "hora_raw": col_hora,
+                        "programa": col_prog,
+                        "clasificacion": col_clas
+                    })
 
     browser.close()
 
-# 3. Post-procesamiento y conversión
+# 3. Procesamiento y Conversión de Horarios
 filas_epg = [
     ["Dia", "Inicio", "Fin", "Programa", "Descripcion"]
 ]
@@ -144,30 +168,35 @@ for p in programas_totales:
     col_hora = p["hora_raw"]
     partes = re.split(r'[–\-–]', col_hora)
     
-    hora_ini_peru = partes[0].strip()
-    hora_fin_peru = partes[1].strip() if len(partes) > 1 else ""
+    hora_ini_raw = partes[0].strip()
+    hora_fin_raw = partes[1].strip() if len(partes) > 1 else ""
 
-    if hora_fin_peru and re.search(r'(am|pm)', hora_fin_peru, re.I) and not re.search(r'(am|pm)', hora_ini_peru, re.I):
-        sufijo = re.search(r'(am|pm)', hora_fin_peru, re.I).group(0)
-        hora_ini_peru += f" {sufijo}"
+    # Extraer am/pm del fin si existe
+    match_ampm_fin = re.search(r'(am|pm)', hora_fin_raw, re.I)
+    ampm_fin = match_ampm_fin.group(0).lower() if match_ampm_fin else None
 
-    ini_art, cruzo_ini = convertir_horario_peru_a_art(hora_ini_peru, sumadd=2)
-    fin_art, _ = convertir_horario_peru_a_art(hora_fin_peru, sumadd=2) if hora_fin_peru else (None, False)
+    # Parsea Perú
+    res_ini = parsear_hora_peru(hora_ini_raw, es_hora_fin=False, ampm_fin=ampm_fin)
+    res_fin = parsear_hora_peru(hora_fin_raw, es_hora_fin=True, ampm_fin=ampm_fin) if hora_fin_raw else None
 
-    if not ini_art:
+    if not res_ini:
         continue
+
+    # Convertir a Hora Argentina (+2h)
+    ini_art = convertir_peru_a_art(res_ini[0], res_ini[1])
+    fin_art = convertir_peru_a_art(res_fin[0], res_fin[1]) if res_fin else ""
 
     desc = f"Clasificación: {p['clasificacion']}" if p['clasificacion'] else ""
 
     filas_epg.append([
         p["dia"],
         ini_art,
-        fin_art if fin_art else "",
+        fin_art,
         p["programa"],
         desc
     ])
 
-# Completar horarios de Fin faltantes
+# Completar horas de Fin vacías con la hora del programa posterior en la misma pestaña
 for i in range(1, len(filas_epg) - 1):
     if not filas_epg[i][2]:
         if filas_epg[i][0] == filas_epg[i+1][0]:
@@ -178,7 +207,7 @@ for i in range(1, len(filas_epg) - 1):
 if len(filas_epg) > 1 and not filas_epg[-1][2]:
     filas_epg[-1][2] = "00:00"
 
-# 4. Volcar en Google Sheets
+# 4. Volcar a Google Sheets
 sheet.clear()
 sheet.update(range_name='A1', values=filas_epg)
-print(f"¡Éxito! Se guardaron {len(filas_epg)-1} bloques con la etiqueta Weekdays para los programas diarios.")
+print(f"¡Éxito! Se actualizaron {len(filas_epg)-1} registros separando adecuadamente Weekdays, Sábado y Domingo.")
